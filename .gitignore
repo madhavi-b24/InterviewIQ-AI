@@ -1,0 +1,29 @@
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# --- Env files (never commit real secrets; .env.example files ARE tracked) ---
+.env
+.env.*
+!.env.example
+
+# --- Node / frontend (added ahead of the frontend scaffold) ---
+node_modules/
+dist/
+.vite/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Docker ---
+*.log
