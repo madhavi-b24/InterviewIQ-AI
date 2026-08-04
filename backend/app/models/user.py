@@ -32,6 +32,9 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class RefreshToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
@@ -45,3 +48,22 @@ class RefreshToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")
+
+
+class PasswordResetToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
+    """Not in Database.md's original Module 1 schema — added in Module 2
+    for the forgot-password/reset-password flow (Architecture.md §8.2,
+    Features.md "Password reset flow"). Mirrors `refresh_tokens`' shape:
+    only a hash of the opaque token is ever stored, never the raw value.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="password_reset_tokens")

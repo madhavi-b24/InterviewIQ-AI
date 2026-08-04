@@ -33,12 +33,13 @@ from app.models.resume import (
     ResumeProject,
     ResumeSkill,
 )
-from app.models.user import RefreshToken, User
+from app.models.user import PasswordResetToken, RefreshToken, User
 
 __all__ = [
     "Base",
     "User",
     "RefreshToken",
+    "PasswordResetToken",
     "Resume",
     "ResumeSkill",
     "ResumeProject",

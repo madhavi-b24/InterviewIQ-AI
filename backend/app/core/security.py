@@ -6,6 +6,8 @@ login rules, or OAuth flows — that use-case logic belongs to Module 2's
 AuthService.
 """
 
+import hashlib
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -16,15 +18,44 @@ from passlib.context import CryptContext
 
 from app.core.config import get_settings
 
-_pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Argon2id (passlib's default argon2 "type") — winner of the Password
+# Hashing Competition, memory-hard by design (resists GPU/ASIC cracking
+# far better than bcrypt). "bcrypt" stays listed only so any pre-existing
+# bcrypt hash still verifies; passlib's `deprecated="auto"` transparently
+# reports such a hash as needing a rehash, but nothing here creates new
+# bcrypt hashes.
+_pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
+
+# A real hash of a fixed, never-used password. verify_password() runs
+# against this when a user/account lookup fails, so a login attempt for a
+# nonexistent email takes the same time as one for a real email with a
+# wrong password — timing is not a viable user-enumeration oracle.
+_DUMMY_PASSWORD_HASH = _pwd_context.hash("dummy-password-for-constant-time-comparison")
 
 
 def hash_password(plain_password: str) -> str:
     return _pwd_context.hash(plain_password)
 
 
-def verify_password(plain_password: str, password_hash: str) -> bool:
-    return _pwd_context.verify(plain_password, password_hash)
+def verify_password(plain_password: str, password_hash: str | None) -> bool:
+    return _pwd_context.verify(plain_password, password_hash or _DUMMY_PASSWORD_HASH)
+
+
+def hash_token(raw_token: str) -> str:
+    """SHA-256 of an opaque, high-entropy token (refresh/reset tokens).
+
+    Unlike passwords, these tokens are generated with 256 bits of entropy
+    (see generate_opaque_token) — a fast deterministic hash is appropriate
+    here because brute-forcing the token itself, not the hash, is the
+    attacker's only path; a slow password-hashing KDF would just add
+    latency on every refresh/reset without a security benefit.
+    """
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def generate_opaque_token() -> str:
+    """Cryptographically secure, URL-safe token for refresh/reset flows."""
+    return secrets.token_urlsafe(32)
 
 
 class TokenType(StrEnum):
@@ -40,6 +71,13 @@ def _create_token(subject: uuid.UUID, token_type: TokenType, expires_delta: time
         "type": token_type.value,
         "iat": now,
         "exp": now + expires_delta,
+        # jose encodes "iat"/"exp" datetimes as whole-second Unix
+        # timestamps, so two tokens for the same user/type/expiry minted
+        # within the same second would otherwise be byte-identical —
+        # which breaks refresh_tokens.token_hash's uniqueness constraint
+        # (e.g. register() then login() in the same second). A random
+        # jti guarantees every token is unique regardless of timing.
+        "jti": str(uuid.uuid4()),
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 

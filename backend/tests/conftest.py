@@ -11,12 +11,69 @@ load_dotenv(Path(__file__).parent.parent / ".env.test", override=True)
 
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 
+from app.api.deps import get_email_provider  # noqa: E402
+from app.cache.redis_client import get_redis_pool  # noqa: E402
+from app.db.session import get_engine  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services.email import EmailProvider  # noqa: E402
+
+
+class FakeEmailProvider(EmailProvider):
+    """Captures "sent" emails in memory instead of the console mock, so
+    tests can assert on the reset token without ever needing it to appear
+    in logs/stdout (see app/services/email.py's ConsoleEmailProvider
+    docstring for why the real mock deliberately never exposes it there).
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_password_reset_email(self, *, to: str, reset_token: str) -> None:
+        self.sent.append((to, reset_token))
+
+
+@pytest.fixture(autouse=True)
+async def _clean_state_between_tests() -> AsyncGenerator[None]:
+    """Every test starts with empty auth tables — cascades to
+    refresh_tokens/password_reset_tokens via their FK to users.
+
+    Also disposes the (process-level, @lru_cache'd) Postgres engine's and
+    Redis pool's connections after each test. pytest-asyncio gives every
+    test function its own event loop; both asyncpg connections and
+    redis.asyncio connections are bound to the loop that opened them, so a
+    pooled connection left open past its test's loop teardown breaks the
+    next test that reuses it ("attached to a different loop" / "Event loop
+    is closed"). Disposing here runs inside the still-live loop, so each
+    pool simply opens fresh connections against the next test's loop on
+    demand — this is the pattern SQLAlchemy's own docs recommend for an
+    engine reused across multiple event loops, applied to both pools we
+    cache at process scope.
+
+    The Redis side of this went undetected until a test started issuing a
+    real Redis command (most tests never touch Redis at all, and one
+    real command was never followed by another in the same run) — see
+    test_auth.py's Google OAuth state tests, which were the first to
+    surface it.
+    """
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.execute(text("TRUNCATE TABLE users RESTART IDENTITY CASCADE"))
+    yield
+    await engine.dispose()
+    await get_redis_pool().disconnect()
 
 
 @pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient]:
+def fake_email_provider() -> FakeEmailProvider:
+    return FakeEmailProvider()
+
+
+@pytest.fixture
+async def client(fake_email_provider: FakeEmailProvider) -> AsyncGenerator[AsyncClient]:
+    app.dependency_overrides[get_email_provider] = lambda: fake_email_provider
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
+    app.dependency_overrides.clear()

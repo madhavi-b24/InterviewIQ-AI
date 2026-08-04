@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,7 +19,26 @@ class Settings(BaseSettings):
     ENVIRONMENT: Literal["local", "test", "staging", "production"] = "local"
     LOG_LEVEL: str = "INFO"
     API_V1_PREFIX: str = "/api/v1"
+    # http://localhost:5173 is Vite's default dev port — the future React
+    # frontend. app.main.create_app() always sets allow_credentials=True
+    # on CORSMiddleware, and the Fetch/CORS spec forbids browsers from
+    # honoring "Access-Control-Allow-Origin: *" together with
+    # "Access-Control-Allow-Credentials: true" — Starlette will not stop
+    # you from configuring that combination, so it's rejected here instead
+    # of being discovered later as a silently-broken (or, on older/buggy
+    # clients, unsafely-permissive) CORS setup.
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+
+    @field_validator("CORS_ORIGINS")
+    @classmethod
+    def cors_origins_must_not_be_wildcard(cls, value: list[str]) -> list[str]:
+        if "*" in value:
+            raise ValueError(
+                "CORS_ORIGINS must not contain '*' — this app always sends "
+                "Access-Control-Allow-Credentials: true, and browsers reject "
+                "that combined with a wildcard origin. List explicit origins."
+            )
+        return value
 
     # --- Database (SQLAlchemy 2.0 async, asyncpg driver)
     DATABASE_URL: str = "postgresql+asyncpg://interviewiq:interviewiq@localhost:5432/interviewiq"
@@ -36,9 +56,23 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
-    # --- Google OAuth (Module 2)
+    # --- Password reset (Module 2)
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
+
+    # --- Email delivery (Module 2). "console" logs the reset link instead of
+    # sending real email — the only mock allowed in non-production, see
+    # app/services/email.py. There is no production provider wired up yet;
+    # ENVIRONMENT=production with EMAIL_PROVIDER=console fails fast on send
+    # rather than silently faking delivery.
+    EMAIL_PROVIDER: Literal["console"] = "console"
+
+    # --- Google OAuth (Module 2). Unset in local/dev by default — the
+    # provider abstraction (app/services/oauth.py) works either way;
+    # GET /auth/google/login returns 503 OAUTH_NOT_CONFIGURED until these
+    # and GOOGLE_REDIRECT_URI are set.
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None
+    GOOGLE_REDIRECT_URI: str | None = None
 
     # --- LLM provider (agents, Module 5+)
     GEMINI_API_KEY: str | None = None

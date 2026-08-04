@@ -8,6 +8,7 @@ responses by hand.
 """
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -46,8 +47,39 @@ class ForbiddenError(AppError):
     code = "FORBIDDEN"
 
 
+class ServiceUnavailableError(AppError):
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "SERVICE_UNAVAILABLE"
+
+
 def _error_envelope(code: str, message: str, details: dict) -> dict:
     return {"error": {"code": code, "message": message, "details": details}}
+
+
+# FastAPI/pydantic validation errors echo the rejected value back under
+# "input" (e.g. {"loc": ["body", "password"], "input": "abc123"}) — useful
+# for most fields, but for these it means the raw secret would round-trip
+# into the HTTP response body (and from there into proxy/APM/error-tracker
+# logs neither this app nor the client controls). Redacted unconditionally,
+# regardless of which field on which request actually failed.
+_SENSITIVE_FIELD_NAMES = {
+    "password",
+    "new_password",
+    "token",
+    "refresh_token",
+    "access_token",
+    "reset_token",
+}
+
+
+def _redact_sensitive_validation_input(errors: list[dict]) -> list[dict]:
+    redacted = []
+    for error in errors:
+        loc = error.get("loc") or ()
+        if "input" in error and any(part in _SENSITIVE_FIELD_NAMES for part in loc):
+            error = {**error, "input": "[REDACTED]"}
+        redacted.append(error)
+    return redacted
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -60,9 +92,15 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        # exc.errors() can contain raw exception objects (pydantic puts the
+        # original ValueError under ctx["error"] for validators that raise
+        # one, e.g. our password-strength check) — jsonable_encoder is what
+        # FastAPI's own default handler uses to make that JSON-safe; a bare
+        # json.dumps() on exc.errors() directly fails on those.
+        errors = _redact_sensitive_validation_input(jsonable_encoder(exc.errors()))
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content=_error_envelope(
-                "VALIDATION_ERROR", "Request validation failed", {"errors": exc.errors()}
+                "VALIDATION_ERROR", "Request validation failed", {"errors": errors}
             ),
         )
