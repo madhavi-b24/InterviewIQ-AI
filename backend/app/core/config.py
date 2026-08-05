@@ -74,13 +74,42 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
 
-    # --- LLM provider (agents, Module 5+)
+    # --- LLM provider (agents, Module 5+; Resume Intelligence, Module 3)
     GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"
 
     # --- Pluggable backends (Architecture.md §6, §8.1) — config selects the
     # implementation, services depend only on the Protocol.
     CODE_EXECUTION_BACKEND: Literal["docker_sandbox", "judge0"] = "docker_sandbox"
     JOB_RUNNER_BACKEND: Literal["background_tasks", "celery"] = "background_tasks"
+
+    # --- Resume Intelligence (Module 3) ---------------------------------
+    # ResumeStorage backend (app/storage/) — "local" writes under
+    # RESUME_STORAGE_LOCAL_DIR on the backend's own filesystem/volume.
+    # An object-storage backend (Azure Blob/S3) is a second implementation
+    # of the same Protocol, selected the same way CODE_EXECUTION_BACKEND is
+    # — never a business-logic change.
+    RESUME_STORAGE_BACKEND: Literal["local"] = "local"
+    RESUME_STORAGE_LOCAL_DIR: str = "./data/resumes"
+    RESUME_MAX_UPLOAD_MB: int = 5
+
+    # ResumeIntelligenceProvider (app/services/resume_intelligence/) — the
+    # LLM-backed structured-extraction seam. "fake" exists only so the
+    # background job (app/jobs/resume_processing.py, which builds its own
+    # provider instance and can't go through app.dependency_overrides) can
+    # be driven deterministically in tests — see .env.test and
+    # tests/conftest.py's autouse fake-provider-reset fixture. Mirrors
+    # EMAIL_PROVIDER=console's shape: app/services/resume/factories.py
+    # refuses to construct the fake in ENVIRONMENT=production, exactly
+    # like ConsoleEmailProvider does, so a misconfigured deployment fails
+    # loudly at startup instead of silently fabricating resume data.
+    RESUME_INTELLIGENCE_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    RESUME_INTELLIGENCE_TIMEOUT_SECONDS: int = 45
+
+    # EmbeddingProvider for resume_embeddings (ChromaDB, Database.md §9).
+    # Same "fake" rationale as RESUME_INTELLIGENCE_PROVIDER above.
+    RESUME_EMBEDDING_PROVIDER: Literal["gemini", "fake"] = "gemini"
 
 
 @lru_cache

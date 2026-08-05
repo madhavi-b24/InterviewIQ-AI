@@ -40,6 +40,22 @@ class SkillSource(StrEnum):
     INFERRED = "inferred"
 
 
+class SkillCategory(StrEnum):
+    """Module 3 — resume_skills.category. Deliberately coarse and fixed in
+    code (not the maintainable alias layer — see
+    app/services/resume/skill_normalization.py) because these are report/UI
+    buckets, not the thing that grows as new technologies appear.
+    """
+
+    PROGRAMMING_LANGUAGE = "programming_language"
+    FRAMEWORK = "framework"
+    DATABASE = "database"
+    CLOUD = "cloud"
+    AI_ML = "ai_ml"
+    DEVELOPER_TOOL = "developer_tool"
+    OTHER = "other"
+
+
 class ParsedStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"

@@ -39,15 +39,22 @@ Base URL: `/api/v1`. All authenticated routes require `Authorization: Bearer <ac
 
 ## 2. Resumes
 
+**Status: implemented in Module 3** — see [backend/README.md](../backend/README.md)'s "Resume Intelligence (Module 3)" section for the full pipeline/design writeup.
+
 | Method | Path | Description | Auth |
 |---|---|---|---|
-| POST | `/resumes` | Upload resume (`multipart/form-data`) → `parsed_status=pending`, kicks off parsing job | required |
-| GET | `/resumes` | List current user's resumes | required |
-| GET | `/resumes/{resume_id}` | Resume detail incl. `parsed_status` | required |
-| GET | `/resumes/{resume_id}/analysis` | Extracted skills, projects, experience | required |
-| POST | `/resumes/{resume_id}/gap-analysis` | Body: `{ "target_role_id": uuid }` → runs gap analysis, returns `resume_gap_analysis` | required |
+| POST | `/resumes` | Upload resume (`multipart/form-data`, field name `file`) → `parsed_status=pending`, kicks off the background processing job | required |
+| GET | `/resumes` | List current user's resumes (all versions, newest first) | required |
+| GET | `/resumes/{resume_id}` | Resume detail incl. `parsed_status`, `processing_error`, `is_active` | required |
+| GET | `/resumes/{resume_id}/analysis` | Structured extraction: education, skills, projects, experience, certifications, achievements — each item includes an `evidence` field | required |
+| POST | `/resumes/{resume_id}/gap-analysis` | Body: `{ "role_key": "backend_engineer" }` → role-readiness + explainable difficulty recommendation, returns the (single, replaced-on-recall) `resume_gap_analysis` row | required |
+| DELETE | `/resumes/{resume_id}` | Delete a resume version. If it was the active one, the next-most-recent resume is promoted to active | required |
 
-Resume parsing runs through the Job Runner (§8.1 of Architecture.md); `GET /resumes/{id}` is the poll target until `parsed_status = done`.
+**Deviation from this document's original draft:** `POST /resumes/{resume_id}/gap-analysis`'s body is `{ "role_key": string }`, not `{ "target_role_id": uuid }` — Module 4 (`companies`/`roles`) isn't built yet, so there is no `roles` row to reference. `role_key` selects one of Module 3's internal InterviewIQ competency profiles (`software_engineer`, `backend_engineer`, `ai_engineer`, `ml_engineer`, `data_engineer` — see backend/README.md). `target_role_id` is still accepted in the request body for forward-compatibility but is not resolved to anything yet.
+
+Every path above enforces resource ownership — a resume ID belonging to another user resolves as `404 RESOURCE_NOT_FOUND` on every method, never `403`, so a client can't distinguish "not yours" from "doesn't exist."
+
+Resume parsing runs through the Job Runner (§8.1 of Architecture.md); `GET /resumes/{id}` is the poll target until `parsed_status = done` (or `failed`, with `processing_error` set — see backend/README.md for the state model and what "failed after partial success" means).
 
 ---
 

@@ -28,6 +28,9 @@ from app.models.report import (
 )
 from app.models.resume import (
     Resume,
+    ResumeAchievement,
+    ResumeCertification,
+    ResumeEducation,
     ResumeExperience,
     ResumeGapAnalysis,
     ResumeProject,
@@ -44,6 +47,9 @@ __all__ = [
     "ResumeSkill",
     "ResumeProject",
     "ResumeExperience",
+    "ResumeEducation",
+    "ResumeCertification",
+    "ResumeAchievement",
     "ResumeGapAnalysis",
     "Company",
     "Role",

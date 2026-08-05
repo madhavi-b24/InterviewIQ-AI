@@ -28,6 +28,13 @@ COPY --from=builder --chown=appuser:appuser /app/app /app/app
 COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
 COPY --from=builder --chown=appuser:appuser /app/alembic.ini /app/alembic.ini
 
+# RESUME_STORAGE_LOCAL_DIR (default ./data/resumes, Module 3) resolves
+# under /app — WORKDIR created /app as root, and only the COPYs above were
+# chowned to appuser, so appuser can't mkdir directly under /app at
+# runtime. Pre-create it here, owned by appuser, so LocalResumeStorage's
+# runtime mkdir(exist_ok=True) is a no-op instead of a PermissionError.
+RUN mkdir -p /app/data/resumes && chown -R appuser:appuser /app/data
+
 ENV PATH="/app/.venv/bin:$PATH"
 USER appuser
 

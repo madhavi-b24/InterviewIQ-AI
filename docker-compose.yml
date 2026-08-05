@@ -60,7 +60,13 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
+      # Resume Intelligence (Module 3) local storage — RESUME_STORAGE_LOCAL_DIR
+      # defaults to ./data/resumes under /app. Named volume so uploaded
+      # resumes survive `docker compose down`/container recreation, same
+      # pattern as postgres_data/chroma_data below.
+      - resume_data:/app/data
 
 volumes:
   postgres_data:
   chroma_data:
+  resume_data:

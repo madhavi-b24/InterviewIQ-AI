@@ -27,3 +27,6 @@ Thumbs.db
 
 # --- Docker ---
 *.log
+
+# --- Local resume storage (Module 3, RESUME_STORAGE_BACKEND=local) ---
+backend/data/

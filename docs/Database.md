@@ -100,17 +100,30 @@ Index: `(user_id)`, `(token_hash)`.
 
 ## 3. Resume Domain
 
+**Updated in Module 3 (Resume Intelligence) — additively.** Every column below marked "Module 3" was added by `alembic/versions/cadc0c718f96_resume_intelligence.py` on top of Module 1's baseline; nothing pre-existing was dropped, renamed, or narrowed. See [backend/README.md](../backend/README.md) for the pipeline this schema backs.
+
 ### `resumes`
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | user_id | uuid | FK → users.id, cascade |
-| file_url | text | not null |
-| original_filename | text | not null |
-| parsed_status | enum(`pending`,`processing`,`done`,`failed`) | not null, default `pending` |
+| file_url | text | not null — a `ResumeStorage` logical key (e.g. `local` backend's relative path), never an absolute filesystem path or anything returned to a client |
+| original_filename | text | not null — client-supplied, sanitized for display only; never used to derive a storage path |
+| parsed_status | enum(`pending`,`processing`,`done`,`failed`) | not null, default `pending` — `processing` covers both the extraction and AI-analysis sub-stages; which one is communicated via `processing_error` on failure, not a separate enum value |
 | raw_text | text | nullable |
+| is_active | boolean | not null, default `true` — *(Module 3)* exactly one `true` row per `user_id`, enforced by the partial unique index below, not just application logic |
+| processing_error | text | nullable — *(Module 3)* human-readable reason, set only when `parsed_status = failed` |
+| mime_type | text | nullable — *(Module 3)* |
+| file_size_bytes | int | nullable — *(Module 3)* |
+| content_sha256 | text | nullable — *(Module 3)* |
+| detected_sections | jsonb | not null, default `{}` — *(Module 3)* raw text split per detected section (Summary/Skills/Experience/...), kept separate from the structured tables below |
+| candidate_name | text | nullable — *(Module 3)* |
+| professional_summary | text | nullable — *(Module 3)* |
+| embeddings_indexed_at | timestamptz | nullable — *(Module 3)* set once `resume_embeddings` (§9) indexing succeeds; null if indexing hasn't run or failed (best-effort, never blocks `parsed_status = done`) |
 | created_at | timestamptz | not null |
+
+Index: `(user_id)`. Partial unique index *(Module 3)*: `(user_id) WHERE is_active` — "at most one active resume per user."
 
 ### `resume_skills`
 
@@ -118,9 +131,13 @@ Index: `(user_id)`, `(token_hash)`.
 |---|---|---|
 | id | uuid | PK |
 | resume_id | uuid | FK → resumes.id, cascade |
-| skill_name | text | not null |
+| skill_name | text | not null — canonical/normalized name (e.g. "PostgreSQL"), what the rest of the app queries by |
 | proficiency_hint | enum(`beginner`,`intermediate`,`advanced`) | nullable |
 | source | enum(`explicit`,`inferred`) | not null |
+| category | enum(`programming_language`,`framework`,`database`,`cloud`,`ai_ml`,`developer_tool`,`other`) | nullable — *(Module 3)* |
+| raw_text | text | nullable — *(Module 3)* as detected before normalization (e.g. "JS") |
+| evidence_text | text | nullable — *(Module 3)* resume fragment this skill was extracted from |
+| confidence | numeric(5,2) | nullable — *(Module 3)* |
 
 Index: `(resume_id)`, `(skill_name)`.
 
@@ -135,6 +152,9 @@ Index: `(resume_id)`, `(skill_name)`.
 | technologies | jsonb | not null, default `[]` |
 | start_date | date | nullable |
 | end_date | date | nullable |
+| responsibilities | jsonb | not null, default `[]` — *(Module 3)* |
+| outcomes | jsonb | not null, default `[]` — *(Module 3)* measurable outcomes, only when explicitly stated on the resume |
+| evidence_text | text | nullable — *(Module 3)* |
 
 ### `resume_experience`
 
@@ -147,16 +167,58 @@ Index: `(resume_id)`, `(skill_name)`.
 | description | text | nullable |
 | start_date | date | nullable |
 | end_date | date | nullable |
+| technologies | jsonb | not null, default `[]` — *(Module 3)* |
+| responsibilities | jsonb | not null, default `[]` — *(Module 3)* |
+| evidence_text | text | nullable — *(Module 3)* |
 
-### `resume_gap_analysis`
+### `resume_education` *(Module 3 — new table)*
+
+Not part of Module 1's original schema (which had no education entity at all).
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | resume_id | uuid | FK → resumes.id, cascade |
-| target_role_id | uuid | FK → roles.id, nullable |
+| institution | text | not null |
+| degree | text | nullable |
+| field_of_study | text | nullable |
+| start_date | date | nullable |
+| end_date | date | nullable |
+| evidence_text | text | nullable |
+
+Index: `(resume_id)`.
+
+### `resume_certifications` / `resume_achievements` *(Module 3 — new tables)*
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK |
+| resume_id | uuid | FK → resumes.id, cascade |
+| name (`resume_certifications`) / description (`resume_achievements`) | text | not null |
+| issuer | text | nullable — `resume_certifications` only |
+| issued_date | date | nullable — `resume_certifications` only |
+| evidence_text | text | nullable |
+
+Index: `(resume_id)` on each.
+
+### `resume_gap_analysis`
+
+Role-readiness + explainable interview-difficulty recommendation (module 3 §11–§12). At most one row per resume by design (see the ER diagram in §1) — a new `POST /resumes/{id}/gap-analysis` call *replaces* this row rather than adding another one.
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK |
+| resume_id | uuid | FK → resumes.id, cascade, **unique** |
+| target_role_id | uuid | FK → roles.id, nullable — unused until Module 4 seeds `roles` |
+| role_key | text | nullable — *(Module 3)* internal InterviewIQ competency-profile key (e.g. `backend_engineer`) used while `target_role_id` is unset |
 | missing_skills | jsonb | not null, default `[]` |
-| recommended_difficulty | enum(`easy`,`medium`,`hard`) | not null |
+| matching_skills | jsonb | not null, default `[]` — *(Module 3)* |
+| strengths | jsonb | not null, default `[]` — *(Module 3)* nice-to-have skills the candidate already has |
+| focus_areas | jsonb | not null, default `[]` — *(Module 3)* |
+| recommended_difficulty | enum(`easy`,`medium`,`hard`) | not null — surfaced to the candidate as Beginner/Intermediate/Advanced |
+| difficulty_reasons | jsonb | not null, default `[]` — *(Module 3)* the explainable signals behind `recommended_difficulty` — never a bare LLM guess |
+| confidence | numeric(5,2) | nullable — *(Module 3)* |
+| explanation | text | nullable — *(Module 3)* |
 | generated_at | timestamptz | not null |
 
 ---
@@ -522,7 +584,7 @@ Redis is never authoritative — it can be flushed and the system recovers from 
 |---|---|---|---|
 | `question_bank` | Pre-authored questions tagged by company/role/topic/difficulty | seed script | Question Generator Agent |
 | `knowledge_base` | Curated reference material / model answers per topic | seed script | Knowledge Agent |
-| `resume_embeddings` | Embedded resume chunks, for gap-analysis similarity search against role requirement embeddings | resume upload pipeline | Resume Intelligence service |
+| `resume_embeddings` | Embedded skill/project/experience/certification evidence chunks, one vector per chunk, metadata `{user_id, resume_id, kind, name}` | resume upload pipeline (best-effort, module 3 §14) | not read by anything yet — indexing-only boundary prepared for the future Interview Engine's Knowledge Agent |
 
 ---
 
@@ -536,6 +598,9 @@ Redis is never authoritative — it can be flushed and the system recovers from 
 | 4 | Coding correctness is derived from `code_submission_test_results`, stored as a computed score with an LLM-authored explanation — never an LLM-guessed number | Enforces "no LLM-only code evaluation" at the schema level, not just in agent prompts |
 | 5 | `report_section_scores` normalized into a child table instead of wide nullable columns | A session without a coding round simply has no `coding` row, instead of a nullable column; adding a 6th section later needs no migration |
 | 6 | `code_submissions` is one row per **attempt** (`attempt_no`, `is_final`), not one row per question | Candidates need to test against sample cases before final submit; only the final attempt is graded (executes hidden cases + triggers the Evaluation Agent), which also keeps LLM cost bounded to one evaluation per coding question |
+| 7 *(Module 3)* | `resumes.is_active` + a partial unique index (`WHERE is_active`), not a separate "current resume" pointer table | Versioning requires many inactive historical rows per user to coexist; a partial unique index enforces "at most one active" at the DB level without a join |
+| 8 *(Module 3)* | `resume_gap_analysis` reused (extended additively) for both gap analysis *and* the interview-level recommendation, instead of a new table | Features.md already scopes both under one entity ("Gap analysis against a target role" / "Recommended starting difficulty from gap analysis"); the ER diagram's `||--o|` cardinality is preserved by a unique constraint on `resume_id`, so a re-request *replaces* the row rather than accumulating history |
+| 9 *(Module 3)* | `resume_education`/`resume_certifications`/`resume_achievements` added as new tables rather than jsonb columns on `resumes` | Matches the existing `resume_skills`/`resume_projects`/`resume_experience` pattern — queryable, indexable, and each row carries its own `evidence_text` for provenance |
 
 ---
 

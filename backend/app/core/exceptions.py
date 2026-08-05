@@ -21,9 +21,17 @@ class AppError(Exception):
     status_code: int = status.HTTP_400_BAD_REQUEST
     code: str = "APP_ERROR"
 
-    def __init__(self, message: str, *, details: dict | None = None) -> None:
+    def __init__(
+        self, message: str, *, details: dict | None = None, code: str | None = None
+    ) -> None:
         self.message = message
         self.details = details or {}
+        # Optional per-instance override — lets one exception class carry
+        # several distinct machine-readable reasons (e.g. UnprocessableEntityError
+        # raised for both "wrong extension" and "invalid PDF signature") without
+        # a new subclass per reason. Falls back to the class-level default.
+        if code is not None:
+            self.code = code
         super().__init__(message)
 
 
@@ -50,6 +58,16 @@ class ForbiddenError(AppError):
 class ServiceUnavailableError(AppError):
     status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     code = "SERVICE_UNAVAILABLE"
+
+
+class UnprocessableEntityError(AppError):
+    """A syntactically valid request whose payload fails a domain-level
+    check we can't express as pydantic field validation — e.g. resume
+    upload file-signature/size/type checks (app/services/resume/pdf.py).
+    """
+
+    status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    code = "UNPROCESSABLE_ENTITY"
 
 
 def _error_envelope(code: str, message: str, details: dict) -> dict:

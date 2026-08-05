@@ -1,0 +1,29 @@
+{
+  "_comment": "Internal InterviewIQ competency profiles (module §11) — NOT an employer's official hiring rubric. required_skills/nice_to_have_skills are canonical skill names (see skill_aliases.json); matching is case-insensitive exact-name comparison, not semantic similarity. Add a new role here, never in readiness.py's logic.",
+
+  "software_engineer": {
+    "label": "Software Engineer / SDE",
+    "required_skills": ["Python", "Java", "JavaScript", "Git", "SQL", "REST APIs"],
+    "nice_to_have_skills": ["TypeScript", "Docker", "AWS", "CI/CD", "React"]
+  },
+  "backend_engineer": {
+    "label": "Backend Engineer",
+    "required_skills": ["Python", "Java", "Node.js", "SQL", "PostgreSQL", "REST APIs", "Git"],
+    "nice_to_have_skills": ["Docker", "Kubernetes", "Redis", "AWS", "GraphQL", "Microservices"]
+  },
+  "ai_engineer": {
+    "label": "AI Engineer",
+    "required_skills": ["Python", "Machine Learning", "PyTorch", "TensorFlow", "LLMs", "NLP"],
+    "nice_to_have_skills": ["LangChain", "LangGraph", "Hugging Face", "Docker", "AWS", "Deep Learning"]
+  },
+  "ml_engineer": {
+    "label": "ML Engineer",
+    "required_skills": ["Python", "Machine Learning", "scikit-learn", "PyTorch", "TensorFlow", "SQL"],
+    "nice_to_have_skills": ["Deep Learning", "NumPy", "pandas", "AWS", "Docker", "Apache Spark"]
+  },
+  "data_engineer": {
+    "label": "Data Engineer",
+    "required_skills": ["Python", "SQL", "PostgreSQL", "ETL", "AWS"],
+    "nice_to_have_skills": ["Apache Spark", "Apache Airflow", "Apache Kafka", "Docker", "Kubernetes", "BigQuery"]
+  }
+}

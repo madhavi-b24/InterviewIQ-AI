@@ -27,6 +27,10 @@ from app.models.user import User
 from app.services.auth_service import AuthService
 from app.services.email import ConsoleEmailProvider, EmailProvider
 from app.services.oauth import GoogleOAuthProvider
+from app.services.resume.factories import build_embedding_index, build_resume_storage
+from app.services.resume.resume_service import ResumeService
+from app.storage.base import ResumeStorage
+from app.vectorstore.resume_embeddings import ResumeEmbeddingIndex
 
 DbSession = Annotated[AsyncSession, Depends(get_db_session)]
 RedisClient = Annotated[Redis, Depends(get_redis)]
@@ -37,6 +41,9 @@ def get_job_runner(background_tasks: BackgroundTasks, settings: AppSettings) -> 
     if settings.JOB_RUNNER_BACKEND == "background_tasks":
         return BackgroundTasksRunner(background_tasks)
     raise NotImplementedError(f"job runner backend {settings.JOB_RUNNER_BACKEND!r} not wired yet")
+
+
+JobRunnerDep = Annotated[JobRunner, Depends(get_job_runner)]
 
 
 def get_code_executor(settings: AppSettings) -> CodeExecutor:
@@ -112,6 +119,39 @@ def get_auth_service(session: DbSession, settings: AppSettings) -> AuthService:
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 EmailProviderDep = Annotated[EmailProvider, Depends(get_email_provider)]
 GoogleOAuthProviderDep = Annotated[GoogleOAuthProvider, Depends(get_google_oauth_provider)]
+
+
+def get_resume_storage(settings: AppSettings) -> ResumeStorage:
+    return build_resume_storage(settings)
+
+
+def get_resume_embedding_index(settings: AppSettings) -> ResumeEmbeddingIndex:
+    return build_embedding_index(settings)
+
+
+ResumeStorageDep = Annotated[ResumeStorage, Depends(get_resume_storage)]
+ResumeEmbeddingIndexDep = Annotated[ResumeEmbeddingIndex, Depends(get_resume_embedding_index)]
+
+
+def get_resume_service(
+    session: DbSession, settings: AppSettings, storage: ResumeStorageDep
+) -> ResumeService:
+    # embedding_index is passed as a *factory*, not a resolved instance —
+    # FastAPI resolves every Depends() in a route's dependency tree before
+    # the endpoint body runs, so making ResumeEmbeddingIndexDep a direct
+    # parameter here would construct GeminiEmbeddingProvider (which raises
+    # if GEMINI_API_KEY is unset) on every resume request, including
+    # upload/list/get — none of which touch embeddings at all. Only
+    # ResumeService.delete_resume's already-best-effort cleanup calls this,
+    # so construction failure there is just one more thing that path logs
+    # and swallows, per module §9 ("the endpoint must not become useless
+    # if Gemini is temporarily unavailable"). Caught the eager-construction
+    # version of this during Docker verification, not by inspection — see
+    # backend/README.md's "What was actually verified" section.
+    return ResumeService(session, settings, storage, lambda: build_embedding_index(settings))
+
+
+ResumeServiceDep = Annotated[ResumeService, Depends(get_resume_service)]
 
 
 async def db_healthcheck(session: DbSession) -> bool:

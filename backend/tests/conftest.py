@@ -18,6 +18,9 @@ from app.cache.redis_client import get_redis_pool  # noqa: E402
 from app.db.session import get_engine  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.email import EmailProvider  # noqa: E402
+from app.services.resume_intelligence.fake_provider import (  # noqa: E402
+    get_fake_resume_intelligence_provider,
+)
 
 
 class FakeEmailProvider(EmailProvider):
@@ -59,7 +62,16 @@ async def _clean_state_between_tests() -> AsyncGenerator[None]:
     """
     engine = get_engine()
     async with engine.begin() as conn:
+        # Cascades to resumes (and every resume_* child table) via their
+        # FK to users — Module 3's tables need no separate truncation.
         await conn.execute(text("TRUNCATE TABLE users RESTART IDENTITY CASCADE"))
+    # The background resume-processing job builds its ResumeIntelligenceProvider
+    # via app/services/resume/factories.py, outside FastAPI's DI — there's no
+    # app.dependency_overrides hook for it, so tests instead mutate this
+    # module-level fake singleton's fail/timeout/malformed flags directly.
+    # Reset here so one test's "simulate a Gemini timeout" can't leak into
+    # the next test's upload.
+    get_fake_resume_intelligence_provider().reset()
     yield
     await engine.dispose()
     await get_redis_pool().disconnect()
