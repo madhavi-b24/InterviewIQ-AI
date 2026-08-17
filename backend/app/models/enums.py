@@ -153,3 +153,36 @@ class ProgressTrend(StrEnum):
     IMPROVING = "improving"
     STABLE = "stable"
     DECLINING = "declining"
+
+
+class InterviewMode(StrEnum):
+    """Module 4 — candidate-selectable interview shape. Primarily a tag on
+    `interview_templates.mode` (which rounds a template represents) that a
+    plan request either inherits or must match exactly — modes never
+    dynamically filter a template's rounds at plan time, keeping round
+    selection entirely data-driven per Architecture.md's "don't hardcode
+    workflow order in agents" rule.
+    """
+
+    FULL_MOCK = "full_mock"
+    TECHNICAL_ONLY = "technical_only"
+    CODING_ONLY = "coding_only"
+    BEHAVIORAL_ONLY = "behavioral_only"
+    RESUME_DEEP_DIVE = "resume_deep_dive"
+
+
+class RequestedDifficulty(StrEnum):
+    """Module 4 — what the candidate asked for at plan time.
+
+    Distinct from DifficultyLevel: adds AUTO, which resolves deterministically
+    (never via an LLM call) to a DifficultyLevel — see
+    app/services/planning/interview_planner.py. `interview_sessions.starting_difficulty`
+    stores the resolved value; `interview_sessions.requested_difficulty` stores
+    this raw preference, so a report can always show what the candidate asked
+    for vs. what was actually used.
+    """
+
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+    AUTO = "auto"

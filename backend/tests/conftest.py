@@ -15,9 +15,10 @@ from sqlalchemy import text  # noqa: E402
 
 from app.api.deps import get_email_provider  # noqa: E402
 from app.cache.redis_client import get_redis_pool  # noqa: E402
-from app.db.session import get_engine  # noqa: E402
+from app.db.session import get_engine, get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.email import EmailProvider  # noqa: E402
+from app.services.planning.catalog_seed import seed_catalog  # noqa: E402
 from app.services.resume_intelligence.fake_provider import (  # noqa: E402
     get_fake_resume_intelligence_provider,
 )
@@ -75,6 +76,24 @@ async def _clean_state_between_tests() -> AsyncGenerator[None]:
     yield
     await engine.dispose()
     await get_redis_pool().disconnect()
+
+
+@pytest.fixture(autouse=True)
+async def _seed_catalog() -> None:
+    """Module 4 — companies/roles/interview_templates/template_rounds are
+    shared catalog data, not user data, so the truncation fixture above
+    never touches them. seed_catalog() is an idempotent upsert (see
+    app/services/planning/catalog_seed.py), so reseeding before every test
+    is always safe (a cheap no-op after the first run within a test
+    session), not just a first-run optimization — this keeps every test
+    independent of run order/selection instead of relying on a
+    session-scoped fixture interacting with pytest-asyncio's per-test
+    event loop (see the truncation fixture's docstring on why that's
+    fragile here).
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        await seed_catalog(session)
 
 
 @pytest.fixture

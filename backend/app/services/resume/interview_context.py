@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import DifficultyLevel
+from app.models.resume import Resume
 from app.repositories.resume import ResumeRepository
 
 
@@ -60,18 +61,14 @@ class ResumeInterviewContext(BaseModel):
     evidence_snippets: list[str]
 
 
-async def get_active_resume_context(
-    session: AsyncSession, user_id: uuid.UUID
-) -> ResumeInterviewContext | None:
-    """Returns None if the candidate has no active resume, or their active
-    resume hasn't finished processing yet — callers (a future
-    StartInterview use case) decide what that means for session creation,
-    this function only reports what's actually available.
+def build_resume_interview_context(resume: Resume) -> ResumeInterviewContext:
+    """Pure transform: an already-loaded Resume (with its children eagerly
+    loaded — skills/projects/experience/gap_analysis) to the flat context
+    shape. Extracted from get_active_resume_context (module §13) so Module 4
+    (app/services/planning/interview_planner.py) can build the same
+    personalization context for an *explicitly selected*, not-necessarily-
+    active resume, without duplicating this assembly logic.
     """
-    resume = await ResumeRepository(session).get_active_for_user_with_children(user_id)
-    if resume is None:
-        return None
-
     skills = [skill.skill_name for skill in resume.skills]
     projects = [
         ProjectContext(
@@ -122,3 +119,17 @@ async def get_active_resume_context(
         recommended_difficulty=gap.recommended_difficulty if gap is not None else None,
         evidence_snippets=evidence_snippets,
     )
+
+
+async def get_active_resume_context(
+    session: AsyncSession, user_id: uuid.UUID
+) -> ResumeInterviewContext | None:
+    """Returns None if the candidate has no active resume, or their active
+    resume hasn't finished processing yet — callers (a future
+    StartInterview use case) decide what that means for session creation,
+    this function only reports what's actually available.
+    """
+    resume = await ResumeRepository(session).get_active_for_user_with_children(user_id)
+    if resume is None:
+        return None
+    return build_resume_interview_context(resume)

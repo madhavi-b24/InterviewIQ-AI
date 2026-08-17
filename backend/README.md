@@ -1,6 +1,6 @@
 # InterviewIQ AI — Backend
 
-FastAPI backend for InterviewIQ AI. **Module 1** built the architecture, database schema, and infrastructure wiring. **Module 2** added production authentication and user identity. **Module 3** (this state of the repo) adds Resume Intelligence: authenticated PDF upload, secure validation, deterministic text extraction, section detection, evidence-grounded structured extraction via Gemini, skill normalization, role-readiness analysis, and an explainable interview-difficulty recommendation. See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next, and [../docs/Architecture.md](../docs/Architecture.md) / [../docs/Database.md](../docs/Database.md) / [../docs/API.md](../docs/API.md) for the design this implements.
+FastAPI backend for InterviewIQ AI. **Module 1** built the architecture, database schema, and infrastructure wiring. **Module 2** added production authentication and user identity. **Module 3** added Resume Intelligence: authenticated PDF upload, secure validation, deterministic text extraction, section detection, evidence-grounded structured extraction via Gemini, skill normalization, role-readiness analysis, and an explainable interview-difficulty recommendation. **Module 4** (this state of the repo) adds the Interview Planner: a candidate-facing catalog of companies/roles/interview templates and a deterministic planning service that turns a (company, role, template, mode, difficulty, resume) selection into an immutable interview plan for the future LangGraph Interview Engine to execute. See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next, and [../docs/Architecture.md](../docs/Architecture.md) / [../docs/Database.md](../docs/Database.md) / [../docs/API.md](../docs/API.md) for the design this implements.
 
 ## Stack
 
@@ -126,11 +126,11 @@ Every table in Database.md §2–§8 has a corresponding model. Split by domain,
 
 | File | Tables |
 |---|---|
-| `enums.py` | Every Postgres ENUM as a Python `StrEnum`, plus `pg_enum()` — a helper that makes SQLAlchemy store each enum's lowercase `.value` (`"local"`, `"google"`) as the DB label. **Without this, SQLAlchemy defaults to storing the Python member's `.name`** (`"LOCAL"`, `"GOOGLE"`) instead, which would silently diverge from what Database.md documents. Caught this during verification, not by inspection — see below. Also `SkillCategory` (Module 3). |
+| `enums.py` | Every Postgres ENUM as a Python `StrEnum`, plus `pg_enum()` — a helper that makes SQLAlchemy store each enum's lowercase `.value` (`"local"`, `"google"`) as the DB label. **Without this, SQLAlchemy defaults to storing the Python member's `.name`** (`"LOCAL"`, `"GOOGLE"`) instead, which would silently diverge from what Database.md documents. Caught this during verification, not by inspection — see below. Also `SkillCategory` (Module 3), `InterviewMode`/`RequestedDifficulty` (Module 4). |
 | `user.py` | `users`, `refresh_tokens`, `password_reset_tokens` (added in Module 2 — not in Database.md's original table, see Architecture decisions below) |
 | `resume.py` | `resumes`, `resume_skills`, `resume_projects`, `resume_experience`, `resume_gap_analysis`, plus *(Module 3, new tables)* `resume_education`, `resume_certifications`, `resume_achievements`. See Database.md §3 for the full additive column list. |
-| `planning.py` | `companies`, `roles`, `interview_templates`, `template_rounds` |
-| `interview.py` | `interview_sessions`, `interview_rounds`, `questions`, `question_test_cases`, `answers`, `code_submissions`, `code_submission_test_results` |
+| `planning.py` | *(Module 4)* `companies`, `roles`, `interview_templates`, `template_rounds` — tables existed empty since Module 1, populated/extended (`is_active`, `role_key`, `mode`, ...) in Module 4. See Database.md §4 for the full column list. |
+| `interview.py` | `interview_sessions`, `interview_rounds` — planning fields (`requested_difficulty`/`starting_difficulty`/`mode`/`plan_snapshot`, nullable `resume_id`) added in Module 4, see Database.md §5; `questions`, `question_test_cases`, `answers`, `code_submissions`, `code_submission_test_results` — modeled ahead of time, no repository/service/API wiring yet (Module 5) |
 | `evaluation.py` | `answer_evaluations`, `coding_evaluations` |
 | `report.py` | `interview_reports`, `report_section_scores`, `report_weak_areas`, `report_strong_areas`, `learning_roadmaps`, `roadmap_items` |
 | `progress.py` | `skill_progress`, `company_readiness`, `user_progress_snapshots` |
@@ -143,11 +143,15 @@ Every table in Database.md §2–§8 has a corresponding model. Split by domain,
 | `repositories/base.py` | Generic `BaseRepository[ModelT]` (get by id, add, list all) — the one piece of the repository pattern that's truly generic. |
 | `repositories/user.py` | `UserRepository` (`get_by_email`, `get_by_google_id`), `RefreshTokenRepository` (`get_by_token_hash`, `revoke`), `PasswordResetTokenRepository` (`get_by_token_hash`, `mark_used`) — the first concrete repositories, added for Module 2's auth queries. |
 | `repositories/resume.py` | *(Module 3)* `ResumeRepository` — every lookup takes `user_id` and filters by it in the query itself (`get_owned`, `get_owned_with_children`, `get_active_for_user`, ...), which is what makes ownership enforcement a property of the query, not something a caller could forget. |
+| `repositories/planning.py` | *(Module 4)* `CompanyRepository`/`RoleRepository`/`InterviewTemplateRepository` — catalog data, so no ownership filter; `is_active` is filtered in-query instead, same rationale as ownership filtering above. |
+| `repositories/interview.py` | *(Module 4)* `InterviewSessionRepository` — `get_owned`/`list_owned`, same ownership-in-query pattern as `ResumeRepository`. |
 | `services/auth_service.py` | `AuthService` — the auth use-case layer: register, login, refresh (with rotation), logout, Google login/register, password reset request/confirm. Owns its own transactions (one commit per public method); routers call exactly these methods, never SQLAlchemy or `app.core.security` directly. |
 | `services/email.py` | `EmailProvider` protocol + `ConsoleEmailProvider` (the only implementation right now — see "Password reset strategy" below). |
 | `services/oauth.py` | `GoogleOAuthProvider` — Authorization Code flow boundary (`build_authorization_url`, `exchange_code`) — see "Google OAuth status" below. |
 | `services/resume/` | *(Module 3)* The deterministic pipeline stages — see "Resume Intelligence (Module 3)" below for the full file-by-file breakdown. |
 | `services/resume_intelligence/` | *(Module 3)* The LLM-backed seam: `ResumeIntelligenceProvider`/`EmbeddingProvider` protocols + Gemini/fake implementations. |
+| `services/planning/` | *(Module 4)* `catalog_service.py` (`CatalogService`, read-only browse), `interview_planner.py` (`InterviewPlannerService.create_plan()` — the planning use case), `catalog_seed.py` (idempotent upsert of `data/catalog.json`) — see "Interview Planner (Module 4)" below. |
+| `services/interview/execution_context.py` | *(Module 4)* `build_execution_context()` — the Module 4 → Module 5 boundary (`InterviewExecutionContext`); not wired to any endpoint yet. |
 
 ### `app/jobs/`, `app/execution/` — the two pluggable-backend seams
 
@@ -173,11 +177,13 @@ Both follow the same shape: a `Protocol` + config-selected implementation, per A
 
 | File | Purpose |
 |---|---|
-| `deps.py` | Every shared FastAPI dependency: `DbSession`, `RedisClient`, `get_current_user`/`CurrentUser` (decodes a bearer access JWT, loads the `User` row), `require_role(*roles)` (403 role-authorization factory), `get_auth_service`/`get_email_provider`/`get_google_oauth_provider` (config-driven), `get_job_runner`/`get_code_executor`, `get_resume_storage`/`get_resume_embedding_index`/`get_resume_service` (Module 3), and `db_healthcheck`/`redis_healthcheck`. |
+| `deps.py` | Every shared FastAPI dependency: `DbSession`, `RedisClient`, `get_current_user`/`CurrentUser` (decodes a bearer access JWT, loads the `User` row), `require_role(*roles)` (403 role-authorization factory), `get_auth_service`/`get_email_provider`/`get_google_oauth_provider` (config-driven), `get_job_runner`/`get_code_executor`, `get_resume_storage`/`get_resume_embedding_index`/`get_resume_service` (Module 3), `get_catalog_service`/`get_interview_planner_service` (Module 4), and `db_healthcheck`/`redis_healthcheck`. |
 | `v1/health.py` | `GET /health` — pings Postgres and Redis rather than just returning 200. |
 | `v1/auth.py` | Auth router (`/auth/*`) — register, login, refresh, logout, Google OAuth login/callback, password-reset request/confirm. Thin: parses the request, calls one `AuthService` method, shapes the response. |
 | `v1/users.py` | `GET /users/me` — returns `UserPublic` for the authenticated user. |
 | `v1/resumes.py` | *(Module 3)* Resume Intelligence router (`/resumes/*`) — upload, list, get, analysis, gap-analysis, delete. Thin, same shape as `v1/auth.py`. |
+| `v1/planning.py` | *(Module 4)* Catalog router (`/companies`, `/companies/{id}/roles`, `/roles`, `/roles/{id}/templates`, `/templates/{id}`) — read-only, not ownership-scoped. |
+| `v1/interviews.py` | *(Module 4)* Interview session router (`/interview-sessions/*`) — create plan, list, get, get plan. `/start`/`/current-turn`/`/answers`/`/abandon` deliberately not implemented here — Module 5. |
 | `v1/router.py` | Aggregates `v1` routers. |
 
 ### `app/main.py`
@@ -193,6 +199,7 @@ Both follow the same shape: a `Protocol` + config-selected implementation, per A
 | `versions/..._initial_schema.py` | The baseline migration (Module 1), autogenerated from every model in `app/models/` — creates all 29 tables. |
 | `versions/..._add_password_reset_tokens.py` | Module 2 migration — adds `password_reset_tokens` only. No enum columns, so none of the initial migration's manual `DROP TYPE` handling applies here. |
 | `versions/..._resume_intelligence.py` | Module 3 migration — additive only (Database.md §3's Module-3-tagged columns/tables + the `resume_skills_category_enum` enum + the `uq_resumes_one_active_per_user` partial index). Verified `upgrade → downgrade → upgrade` and `alembic check` (no drift) on both `interviewiq` and `interviewiq_test`. |
+| `versions/..._interview_planner.py` | Module 4 migration — additive only on top of Module 1's already-existing-but-empty `companies`/`roles`/`interview_templates`/`interview_sessions` tables (Database.md §4's Module-4-tagged columns + 4 new enum types + relaxing `interview_sessions.resume_id` to nullable). Verified `upgrade → downgrade -1 → upgrade head` and `alembic check` (no drift) on `interviewiq`. |
 
 ### `tests/`
 
@@ -203,6 +210,7 @@ Both follow the same shape: a `Protocol` + config-selected implementation, per A
 | `test_auth.py` | Registration, login, JWT (valid/invalid/expired/wrong-type), refresh rotation and reuse-rejection, `require_role`, logout + session revocation, password reset (request/confirm/single-use/token-invalidation-of-sessions), the Google OAuth boundary (503 when unconfigured, unverified-email link refusal), and targeted security assertions (Argon2 hash, hashed-not-raw token storage, redacted validation errors). 33 tests total. |
 | `pdf_fixtures.py` | *(Module 3)* Hand-rolled minimal-PDF byte builder (no reportlab dependency) — a small well-formed synthetic multi-page resume for a clearly fictional candidate ("Alex Rivera"), a blank/no-text PDF, and wrong-signature/truncated/empty byte fixtures for upload-validation tests. |
 | `test_resumes.py` | *(Module 3)* 44 tests across upload validation, ownership, extraction, structured analysis (incl. LLM malformed/timeout/failure paths via the fake provider), skill normalization, versioning, role readiness/difficulty, and security (path traversal, cross-user access). See "Resume Intelligence (Module 3)" below for the full breakdown. |
+| `test_interview_planning.py` | *(Module 4)* 31 tests across catalog browsing/filtering, plan creation (generic/resume-aware, manual/AUTO difficulty), resume selection/ownership/readiness, interview ownership, request validation, and plan-snapshot immutability. See "Interview Planner (Module 4)" below for the full breakdown. An autouse `_seed_catalog` fixture in `conftest.py` reseeds the MVP catalog (idempotent) before every test, since the per-test truncation fixture never touches catalog tables. |
 
 ---
 
@@ -369,7 +377,21 @@ level = easy if score < 0.35 else medium if score < 0.70 else hard   # Beginner 
 
 ### Gemini integration status
 
-**Fully implemented, verified with mocked/fake providers only — not exercised against a live Gemini API in this environment** (no `GEMINI_API_KEY` available here). What *was* verified live: `GeminiResumeIntelligenceProvider(settings)` and `GeminiEmbeddingProvider(settings)` construct correctly and raise `ResumeIntelligenceProviderError`/`EmbeddingProviderError` immediately when `GEMINI_API_KEY` is unset (see "What was actually verified" below) — this is the fail-fast path a misconfigured deployment hits. The full extraction/embedding pipeline was verified end-to-end against `FakeResumeIntelligenceProvider`/`FakeEmbeddingProvider` (44 tests in `test_resumes.py`).
+**Fully implemented and now verified live against the real Gemini API** (a `GEMINI_API_KEY` became available in a later session — see "Gemini structured-output schema fix" below for what that live run found and fixed). `GeminiResumeIntelligenceProvider(settings)`/`GeminiEmbeddingProvider(settings)` still construct correctly and raise `ResumeIntelligenceProviderError`/`EmbeddingProviderError` immediately when `GEMINI_API_KEY` is unset — the fail-fast path a misconfigured deployment hits. The full extraction pipeline is verified two ways: against `FakeResumeIntelligenceProvider` (44+ tests in `test_resumes.py`, every run) and, live, against the real `gemini-2.5-flash` structured-output API (this session, using the same synthetic fictional-candidate resume text `pdf_fixtures.py` already used for fake-provider tests).
+
+### Gemini structured-output schema fix
+
+A live run (after a `GEMINI_API_KEY` became available) surfaced a real bug the fake-provider test suite structurally cannot catch: `POST /resumes` consistently failed AI analysis with `"Gemini request failed: Default value is not supported in the response schema for the Gemini API."`
+
+**Root cause**: `google-genai`'s client-side schema converter (`_transformers.process_schema`, invoked by every real `generate_content(..., response_schema=...)` call before any network request) rejects a `response_schema` if **any** field in its Pydantic-generated JSON Schema carries a non-null `"default"` key. `ExtractedProfile`'s only offending field was `ExtractedSkill.source: str = Field(default="explicit", ...)` — a plain `X | None = None` field serializes as `"default": null` (explicitly allowed by the SDK), and a `default_factory=list` field isn't materialized into `"default"` at all (Pydantic just omits it from `required`), so every other field in the schema tree was already fine. This was a **latent bug present since Module 3 shipped** — never caught before because Module 3's own verification had no live Gemini credentials available, and `FakeResumeIntelligenceProvider` (used by every automated test) constructs `ExtractedProfile` directly, bypassing the real SDK's schema-conversion step entirely.
+
+**Fix** (`app/services/resume_intelligence/schemas.py`, one field): dropped `default="explicit"` from `ExtractedSkill.source`, making it a required (not defaulted) field. Behaviorally inert — `gemini_provider.py`'s system prompt already instructs the model to always classify every skill's `source`, so nothing that previously relied on the Python-level fallback ever exercised it in practice; the fake provider's one construction site already passed `source="explicit"` explicitly. The provider `Protocol`, `ExtractedProfile`'s other fields/validation, evidence-grounding requirements, and every other file were untouched. Added a durable guard: a "Gemini structured-output constraint" note at the top of `schemas.py` explaining exactly which Pydantic constructs are safe (`X | None = None`, `default_factory=list`) vs. unsafe (any other non-None `default=`), so this class of bug can't silently reappear on a future field.
+
+**Regression coverage** (`tests/test_resume_intelligence_gemini_schema.py`, 2 new tests, no network/API key required): one walks `ExtractedProfile.model_json_schema()` asserting no non-null `"default"` exists anywhere in the tree; the other calls the exact `google-genai` SDK function (`_transformers.t_schema`) that `generate_content` invokes internally, against a dummy-key client, and asserts it doesn't raise. Both were confirmed to **fail** against the pre-fix schema (reproducing the identical production error message) before being confirmed to pass against the fix — a true regression test, not just an assertion of intent.
+
+**Live verification, this session** (`GEMINI_API_KEY` configured): direct `GeminiResumeIntelligenceProvider.extract()` call against the synthetic fictional resume — succeeded, correct candidate name/skills/projects/experience/certifications/achievements, all evidence-grounded. Full HTTP pipeline through the rebuilt Docker container: `POST /resumes` → polled to `parsed_status: "done"` (previously always `"failed"`) → `GET /resumes/{id}/analysis` → all fields populated, skills normalized (`"Postgres"` → `"PostgreSQL"`, `"JS"` → `"JavaScript"`), every item's `evidence` a genuine resume substring → `POST /resumes/{id}/gap-analysis` → correct readiness/difficulty output → Module 4 resume-aware `POST /interview-sessions` with `"difficulty": "auto"` → `starting_difficulty` correctly resolved from the now-real gap-analysis, `personalization` block populated from live-extracted data. No hallucinated fields, no PII beyond what the synthetic fictional resume itself contains.
+
+**Separate issue found, not fixed (out of scope for this fix)**: the same live run's embedding-indexing step (best-effort, never affects `parsed_status`) logged `resume.process.embedding_index_failed` — `models/text-embedding-004 is not found for API version v1beta, or is not supported for embedContent`. This is unrelated to the `response_schema` bug above (it's the embedding model/API-version configuration in `GeminiEmbeddingProvider`, not structured output) and doesn't block resume analysis, gap-analysis, or interview planning — all of which were verified live and correct. Flagged here for whoever next touches Module 3's embedding path; not addressed in this fix per its explicit scope (fix only the structured-output schema incompatibility).
 
 ### ChromaDB usage/status
 
@@ -385,7 +407,7 @@ level = easy if score < 0.35 else medium if score < 0.70 else hard   # Beginner 
 
 ### Known limitations
 
-- Gemini extraction/embeddings were verified against fake providers only in this environment (no live API key) — see "Gemini integration status" above.
+- The Gemini **embedding** path (`GeminiEmbeddingProvider`, used for ChromaDB indexing) currently fails live with a 404 (`models/text-embedding-004` not found for `embedContent` on API version `v1beta`) — found during this session's live verification, not yet fixed (out of scope for the structured-output schema fix above; embedding indexing is best-effort and doesn't block resume analysis/gap-analysis/interview planning). See "Gemini structured-output schema fix" above.
 - OCR for scanned/image-only PDFs is explicitly out of scope for this milestone (module §3) — such resumes are marked `failed` with a clear message, not silently mis-processed.
 - `pypdf`'s parsing (upload-time validation, background extraction) runs on a thread via `asyncio.to_thread` rather than natively async — appropriate for resume-sized PDFs, but real backpressure under heavy concurrent load would need a bounded thread pool / worker-based execution (same class of concern Module 6 already flags for the code-execution sandbox).
 - `resumes.raw_text` (the full extracted text) is intentionally never returned by any API response — only structured, evidence-tagged data is. If a future need arises to show raw text in a UI, that's a new schema field on `ResumeAnalysisResponse`, not a design gap.
@@ -393,6 +415,90 @@ level = easy if score < 0.35 else medium if score < 0.70 else hard   # Beginner 
 - Role competency profiles (`data/role_profiles.json`) are a fixed set of five roles; adding a sixth is a data change, not a code change, but there's no admin UI for it yet (consistent with Features.md marking that "Later").
 
 ---
+
+## Interview Planner (Module 4)
+
+### Architecture
+
+```
+Catalog browsing:
+Router (app/api/v1/planning.py)
+  → CatalogService (app/services/planning/catalog_service.py) — thin, 404-translating
+    → CompanyRepository / RoleRepository / InterviewTemplateRepository (app/repositories/planning.py)
+      — is_active filtered in-query, shared/unowned catalog data
+
+Plan creation:
+Router (app/api/v1/interviews.py)
+  → InterviewPlannerService.create_plan() (app/services/planning/interview_planner.py) — owns the transaction
+    → resolves company/role/template (active + matching each other)
+    → resolves mode (inherits template.mode, or must match it exactly)
+    → resolves resume (explicit selection: owned + parsed_status=done; else active resume; required
+      for resume_deep_dive mode or a template with a resume_discussion round)
+    → resolves difficulty: explicit value verbatim, or AUTO → resume.gap_analysis.recommended_difficulty
+      (Module 3, deterministic) if available and role-matched, else the documented safe default (medium)
+    → app/services/resume/interview_context.py::build_resume_interview_context() (Module 3, reused as-is)
+      — assembles the personalization block, no new abstraction
+    → builds the immutable plan_snapshot dict + one InterviewRound per TemplateRound
+    → persists InterviewSession + InterviewRound rows, one commit
+
+Catalog seeding (idempotent, run at deploy time / by tests, not via migration):
+app/db/seed_catalog.py (CLI: `uv run python -m app.db.seed_catalog`)
+  → app/services/planning/catalog_seed.py — upserts app/services/planning/data/catalog.json
+    by natural key (slug / (company_id, role_key, title) / (company_id, role_id, name) /
+    (template_id, sequence_no)); round deletions are SAVEPOINT-scoped so a round still
+    referenced by a live interview_rounds row (ON DELETE RESTRICT) is skipped, not fatal
+
+app/services/interview/execution_context.py — the Module 4 → Module 5 boundary; not wired to any
+endpoint yet. build_execution_context(session) reads only plan_snapshot + interview_rounds, never
+re-queries companies/roles/templates/resumes live.
+```
+
+Zero Gemini/LLM calls anywhere in this module — `InterviewPlannerService` is deterministic end to end. AUTO difficulty reuses a number Module 3 already computed; it never triggers a fresh model call.
+
+### Catalog design
+
+`companies`, `roles`, `interview_templates`, `template_rounds` (Database.md §4) were created empty by Module 1's initial migration; Module 4 adds the columns needed to actually use them (`is_active` on companies/roles/templates, `role_key` on roles, `mode` on templates) and seeds an MVP catalog from a data file, not migration logic — adding a company/role/template later is a data change to `app/services/planning/data/catalog.json`, never a code change. Seeded MVP catalog: **6 companies** (`general`, `google`, `microsoft`, `amazon`, `atlassian`, `openai`), **7 roles** (the 5 generic role-profile roles + 2 Google/Amazon-specific Software Engineer roles), **10 templates**, **29 rounds** total.
+
+**Companies are InterviewIQ preparation profiles, not official hiring-process specifications.** Every non-`general` company's `interview_style_notes` explicitly says so (e.g. "...based on publicly discussed patterns... Not Google's official interview process and not affiliated with or endorsed by Google.") — this disclaimer is data (seed content), not just documentation, so it round-trips into every `GET /companies` response.
+
+`roles.role_key` is the canonical link back to Module 3's `app/services/resume/data/role_profiles.json` taxonomy (`software_engineer`, `backend_engineer`, `ai_engineer`, `ml_engineer`, `data_engineer`) — one taxonomy, not two. AUTO difficulty and personalization both key off this instead of re-deriving a role identity from `title`.
+
+### Interview modes
+
+`InterviewMode`: `FULL_MOCK`, `TECHNICAL_ONLY`, `CODING_ONLY`, `BEHAVIORAL_ONLY`, `RESUME_DEEP_DIVE`. Primarily a tag on `interview_templates.mode` — a plan request either inherits the selected template's mode or must match it exactly (`422 INCOMPATIBLE_MODE` otherwise); modes never dynamically re-filter a template's rounds at plan time, keeping round selection entirely data-driven (Architecture.md's "don't hardcode workflow order in agents" principle, applied one layer earlier).
+
+### AUTO difficulty resolution
+
+`RequestedDifficulty` (`EASY`/`MEDIUM`/`HARD`/`AUTO`) is distinct from `DifficultyLevel` (`EASY`/`MEDIUM`/`HARD`, no AUTO) — the former is what the candidate asked for, the latter is what a difficulty value actually *is*. `InterviewPlannerService._resolve_difficulty()`:
+
+- explicit `easy`/`medium`/`hard` → used verbatim, reason = `"Candidate explicitly requested <level> difficulty."`
+- `auto` + a resolved resume with `resume_gap_analysis` present → `gap_analysis.recommended_difficulty` (Module 3's deterministic weighted score — see "Difficulty-recommendation algorithm" above), with the reason explicitly noting whether the gap-analysis's `role_key` matches the plan's selected role or is being used as a best-available signal anyway
+- `auto` + no usable gap-analysis (no resume, or a resume with none) → the documented safe default (`medium`), reason = `"AUTO requested but no resume gap-analysis was available — defaulted to the documented safe default (medium)."`
+
+Both `requested_difficulty` (raw candidate input) and `starting_difficulty` (resolved value) are persisted on `interview_sessions`, separate from `current_difficulty` (equal to `starting_difficulty` at plan time; the only field Module 5's future Difficulty Agent will ever mutate) — see Database.md §5's design note.
+
+### Plan snapshot strategy
+
+Round order/weights/planned-difficulty stay **normalized** in `interview_rounds` (queryable, matches the pre-existing `template_rounds` snapshot pattern). `interview_sessions.plan_snapshot` (JSONB) carries only what would otherwise require re-joining mutable `companies`/`roles`/`interview_templates`/resume tables: denormalized company/role/template labels, the difficulty-resolution reasons, and — for resume-aware plans — a personalization block (canonical skills, focus areas, matching/missing skills, project titles, up to 20 evidence snippets; never raw resume text or contact info). See Architecture.md's Decisions Log #7/#8 and Database.md §5 for the full rationale. Verified immutable by two tests: editing a template's name/`default_difficulty` after planning doesn't change an already-created plan's snapshot or rounds; uploading a newer resume doesn't change which resume an already-created plan references.
+
+### `InterviewExecutionContext` — the Module 5 contract
+
+`app/services/interview/execution_context.py::build_execution_context(session)` returns `InterviewExecutionContext`: `interview_id`, `user_id`, `company_name`, `role_title`/`role_key`, `mode`, `rounds` (ordered, typed `RoundExecutionPlan`), `starting_difficulty`, `personalization` (typed `PersonalizationContext`, or `None`), and `resume` (a `ResumeReference` — just `resume_id`, never resume content). Built entirely from `plan_snapshot` + `interview_rounds`, both immutable once the plan exists — mirrors Module 3's `app/services/resume/interview_context.py` seam. A LangGraph agent that only ever calls this one function is structurally unable to reach `companies`/`roles`/`interview_templates`/`resumes` directly, satisfying module §19's "prevent LangGraph agents from directly querying many unrelated repositories" by construction. Not wired to any endpoint yet — Module 5's job.
+
+### Security protections
+
+- **Catalog**: every browsing endpoint filters `is_active` in the query itself (`CompanyRepository`/`RoleRepository`/`InterviewTemplateRepository`), same "property of the query, not something a caller could forget" pattern as ownership filtering below. Inactive companies/roles/templates are both excluded from listings and rejected as plan targets (`404`).
+- **Ownership / IDOR**: `InterviewSessionRepository.get_owned`/`list_owned` filter by `user_id` in the query itself. Every interview-session endpoint returns `404 RESOURCE_NOT_FOUND` (`code=INTERVIEW_NOT_FOUND`) — never `403` — for a session that exists but isn't the caller's.
+- **Cross-user resume selection**: an explicitly-selected `resume_id` that belongs to another user resolves as `404 RESUME_NOT_FOUND` at the query level (`ResumeRepository.get_owned_with_children`), identical to Module 3's own resume-ownership pattern — never a distinguishable "found, but not yours."
+- **PII**: `plan_snapshot`'s personalization block only ever carries already-evidence-tagged, already-normalized data (skills/focus areas/project titles/evidence snippets) sourced from Module 3's own `interview_context.py` boundary — never raw resume text, contact info, or file paths.
+
+### Known limitations
+
+- `roles` and `template_rounds` have no `created_at` column, unlike every other table in Database.md §0's stated convention — a pre-existing Module 1 gap, not something Module 4 introduced or fixed (touching Module 1's already-approved baseline tables was out of scope here). See Database.md §4.
+- `resume_gap_analysis.target_role_id` remains unresolved: Module 4 now seeds `roles`, but `POST /resumes/{id}/gap-analysis` (Module 3, unchanged) still only accepts/stores `role_key`. Wiring that resolution is a Module 3 change, not attempted here.
+- No admin UI for managing companies/roles/templates — catalog is seed-file + CLI only, matching Roadmap.md's stated Module 4 scope ("seeded via script, no admin UI yet").
+- `/interview-sessions/{id}/start`, `/current-turn`, `/answers`, `/abandon` are not implemented — they require the LangGraph Supervisor (Module 5). A planned interview can be created, listed, and retrieved, but never actually run, through this module alone.
+- Live end-to-end verification of a *resume-aware* plan (real Gemini-analyzed resume, not the fake test provider) surfaced a pre-existing **Module 3** issue in this environment (see "What was actually verified" below) — out of scope to fix here since it's in the Gemini provider, not the planner; the planner's own handling of a not-ready resume (`409 RESUME_NOT_READY`) was verified live and behaves correctly regardless.
 
 ## Manually verifying authentication with Swagger
 
@@ -419,6 +525,20 @@ Password reset and Google OAuth aren't in the required walkthrough above, but ca
 8. **Ownership check**: register a second account, Authorize with *its* token, then `GET /api/v1/resumes/{resume_id}` using the first account's resume ID → expect `404`, not the first account's data.
 
 Without `GEMINI_API_KEY` configured, step 3 settles on `parsed_status: "failed"` with `processing_error` explaining AI analysis is unavailable — upload/list/get/delete still work end to end; only steps 4–5 have nothing to show.
+
+## Manually verifying Interview Planning with Swagger
+
+1. Ensure the catalog is seeded: `uv run python -m app.db.seed_catalog` (idempotent — safe to run again). Register/log in and **Authorize** with an access token as in step 1–4 above.
+2. **Browse companies**: `GET /api/v1/companies` → Execute. Expect 6 companies (`general`, `google`, `microsoft`, `amazon`, `atlassian`, `openai`), each with an `interview_style_notes` field explaining it's an InterviewIQ preparation profile, not an official process. Copy a `general`-slug company's `id` if you want it later, or skip company entirely for a generic plan.
+3. **Browse roles**: `GET /api/v1/roles` → Execute. Expect 7 roles; filter with `?level=mid` to see the effect. Copy the `id` of the role with `role_key: "software_engineer"` and `company_id: null`.
+4. **Browse templates for that role**: `GET /api/v1/roles/{role_id}/templates` (paste the role id) → Execute. Expect several templates (e.g. "Full Mock Interview", "Coding Practice", "Behavioral Prep", "Resume Deep Dive"). Copy the `id` of **"Coding Practice"** (`mode: "coding_only"`, no resume required).
+5. **Inspect template detail**: `GET /api/v1/templates/{template_id}` → Execute. Expect `rounds` ordered by `sequence_no`, weights summing to `1.00`.
+6. **Create a generic (no-resume) plan**: `POST /api/v1/interview-sessions` → body `{"role_id": "<role id>", "template_id": "<Coding Practice template id>", "difficulty": "medium"}` → Execute. Expect `201` with `status: "not_started"`, `resume_id: null`, `starting_difficulty: "medium"`. Copy the returned `id`.
+7. **Retrieve the plan**: `GET /api/v1/interview-sessions/{id}/plan` → Execute. Expect the full immutable snapshot: `company: null`, `role`, `template`, ordered `rounds`, `difficulty.reasons` explaining the resolution, `personalization: null` (no resume was used).
+8. **Try AUTO without a resume**: repeat step 6 with `"difficulty": "auto"` and no `resume_id`. Expect `starting_difficulty: "medium"` and a `/plan` reason mentioning "safe default".
+9. **Resume-aware plan**: upload + gap-analyze a resume per the Resume Intelligence walkthrough above (`POST /resumes`, poll until `done`, `POST /resumes/{id}/gap-analysis` with `{"role_key": "backend_engineer"}`), then find a role/template pairing that includes a `resume_discussion` round (e.g. role `role_key=software_engineer`, template "Full Mock Interview") or just pass the resume id explicitly to any template. `POST /interview-sessions` with `"resume_id": "<resume id>"` and `"difficulty": "auto"` → Execute. `GET .../plan` afterward should show a non-null `personalization` block and a `difficulty.reasons` entry mentioning "gap-analysis".
+10. **Ownership check**: register a second account, Authorize with *its* token, then `GET /api/v1/interview-sessions/{id}` and `GET /api/v1/interview-sessions/{id}/plan` using the first account's interview ID → expect `404` on both.
+11. **Validation check**: repeat step 6 with a `template_id` that belongs to a different role, or a `mode` that doesn't match the template's own mode → expect `422` with `code: "TEMPLATE_ROLE_MISMATCH"` / `"INCOMPATIBLE_MODE"`.
 
 ## What was actually verified, not just written (Module 2)
 
@@ -454,8 +574,43 @@ Every piece of this milestone was run, not just authored:
 - Confirmed the uploaded file was actually written under the container's `resume_data` volume with correct `appuser` ownership (`docker compose exec backend ls /app/data/resumes/`), and that `DELETE` actually removed it from disk.
 - Grepped `docker compose logs backend` for `password|bearer` plus the fixture candidate's name/resume-fixture content after the full smoke run above — no match; no resume text, password, or bearer token appears anywhere in the logs.
 
+## What was actually verified, not just written (Module 4)
+
+Module 4 arrived already implemented (models, migration, repositories, services, schemas, routers, seed data, and a 31-test suite) but never actually run — `ruff`/`black`/`pytest`/`alembic`/Docker had not been executed against it before this verification pass. Every claim below is from an actual run, and two real bugs were found and fixed in the process (this is what "verify, don't just read" caught that code review alone did not):
+
+- `uv sync` — no new dependencies, resolves cleanly.
+- `ruff check .` — **initially 5 errors** (line-length, one `zip()` without `strict=`) across `execution_context.py`, `catalog_seed.py`, `repositories/interview.py`, `repositories/planning.py`, `test_interview_planning.py` — these Module 4 files had evidently never been run through the linter. Fixed with `ruff check . --fix` + `black .`; both now pass clean.
+- Migration (`interview planner`) round-tripped on the dev `interviewiq` database: `upgrade head` (already there) → `downgrade -1` → `upgrade head`; `alembic check` reports no drift.
+- `pytest` — **first full run: 21 failed, 93 passed.** Root cause: `test_interview_planning.py`'s `_find_template` test helper called `_templates_for_role(..., company_id=None)`, and httpx 0.27 serializes `params={"x": None}` as the literal query string `x=` rather than omitting the parameter — FastAPI then 422'd trying to parse `""` as a UUID/enum. **This is a test-infrastructure bug** (an httpx behavior the test helper didn't account for), not a planner defect; fixed by dropping `None`-valued params before the request.
+- Re-running surfaced **three more, genuine** failures behind the first bug's noise:
+  1. **Real production bug**: `InterviewPlanResponse.company: dict` (schemas/interview.py) was non-optional, but a company-agnostic plan's snapshot legitimately has `company=None` (`InterviewSession.company_id` is nullable per module design) — every `GET /interview-sessions/{id}/plan` for a no-company interview crashed with a pydantic `ValidationError`. Fixed: `company: dict | None`. Added a dedicated regression test (`test_plan_endpoint_returns_null_company_for_company_agnostic_interview`) rather than relying on it being caught incidentally.
+  2. **Real test bug**: `test_rounds_generated_from_template_preserve_order_and_weights` planned against "Full Mock Interview" — which includes a `resume_discussion` round, so it requires an analyzed resume — without ever uploading one, so the planner correctly 422'd with `RESUME_REQUIRED` before the test's actual assertions ran. Fixed by uploading/analyzing a resume first, matching what the template genuinely requires.
+  3. **Real test-isolation bug, only visible on a second run**: `test_editing_template_after_planning_does_not_change_existing_plan` renames the shared "Coding Practice" catalog template row directly via the DB session to prove the plan snapshot doesn't change — but never reverted the rename. Catalog tables are seed-idempotent and never truncated between tests, so the next `_seed_catalog` upsert (matching by `(company_id, role_id, name)`) no longer found a row named "Coding Practice", inserted a *second* one, and left the renamed original behind — silently duplicating catalog data across every subsequent test run. First full run passed by luck (nothing else depends on there being exactly one "Coding Practice" template); a second consecutive run then failed `test_template_filtering_by_company_and_mode`'s `len(...) == 1` assertion. Fixed with a `try`/`finally` that restores `name`/`default_difficulty`, matching the pattern the other catalog-mutating tests (`test_inactive_company_excluded_from_listing_and_rejected`, `test_inactive_template_rejected`) already used correctly. Cleaned the accumulated duplicate rows out of the test database and confirmed **three consecutive full runs** all pass clean.
+- **Final state: 115 passed, 0 failed**, verified stable across 3 consecutive runs (84 pre-existing Module 1–3 tests + 31 Module 4 tests) — confirms no regression to auth/resume/health alongside full Module 4 coverage, and no state leakage between runs.
+- `docker compose up -d --build backend` (full stack: postgres, redis, chromadb, backend) builds and starts cleanly; `GET /api/v1/health` returns `{"status":"ok","checks":{"database":true,"redis":true}}` over the Docker network.
+- Catalog was empty in the (until-now-unseeded) dev database — `GET /companies`/`GET /roles` returned `[]` on first check. This is expected (seeding is a startup/CLI step, not part of the migration, per module design) — ran `uv run python -m app.db.seed_catalog` (`companies=6 roles=7 templates=10 rounds=29`), then browsing worked as documented.
+- Full planning flow smoke-tested with real `curl` against the running Docker container (not just pytest): register → list companies/roles/templates → create a generic no-resume plan (`201`, `resume_id: null`, `starting_difficulty` resolved) → retrieve it (`200`) → list own interviews (appears) → register a second user → that user `GET`s the first user's interview and its `/plan` (`404 INTERVIEW_NOT_FOUND` on both).
+- **Resume-aware plan smoke test surfaced a real issue, but in Module 3, not Module 4**: uploading a resume and letting it process against the *real* Gemini API (a `GEMINI_API_KEY` is configured in this environment) failed with `"AI analysis failed: Gemini request failed: Default value is not supported in the response schema for the Gemini API."` — a `google-genai` SDK/response-schema compatibility issue in `GeminiResumeIntelligenceProvider`, never exercised by `pytest` (which uses the deterministic fake provider) or by Module 3's own prior verification (no API key was available then). At the time, **not fixed** — it was inside Module 3's Gemini provider, out of Module 4's scope, and Module 4's planner was not the cause: it correctly rejected the resulting `parsed_status: "failed"` resume when explicitly selected (`409 RESUME_NOT_READY`, verified live). **Since fixed** in a follow-up session — see "Gemini structured-output schema fix" in the Resume Intelligence (Module 3) section above for the root cause, fix, regression test, and live re-verification (including this exact resume-aware Module 4 plan flow, now succeeding end to end with a real Gemini-analyzed resume).
+
+## What was actually verified, not just written (Gemini structured-output schema fix)
+
+Follow-up session, addressing the blocker the Module 4 verification above found. Every claim is from an actual run:
+
+- Root cause confirmed by directly invoking `google.genai._transformers.t_schema(client, ExtractedProfile)` (the exact function `models.generate_content` calls internally) against a dummy-key client — reproduced the identical `ValueError` with no network call, then confirmed it disappears after the fix.
+- Wrote 2 new regression tests, then **proved they would have caught the original bug**: temporarily reverted the fix, reran the new tests (both failed, reproducing the exact production error message), reapplied the fix, reran (both passed). Not just written — verified to actually discriminate buggy from fixed.
+- `ruff check .` and `black --check .` — clean, including the new test file.
+- `alembic check` — no drift (this fix touched no models/migrations).
+- `pytest` — **117 passed, 0 failed** (115 prior + 2 new), verified stable across 2 consecutive full runs.
+- `docker compose up -d --build backend` — rebuilt with the fix, starts cleanly; `GET /api/v1/health` → `{"status":"ok",...}`.
+- **Live Gemini smoke test, real API, no mocking**: direct `GeminiResumeIntelligenceProvider.extract()` call against the synthetic fictional resume (`tests/pdf_fixtures.py`'s "Alex Rivera" text) — succeeded. Then the full HTTP pipeline through the rebuilt container: `POST /resumes` → `parsed_status` polled from `pending` → `processing` → **`done`** (previously always `failed`) → `GET /resumes/{id}/analysis` (all fields correctly populated and evidence-grounded) → `POST /resumes/{id}/gap-analysis` (correct readiness/difficulty) → Module 4 `POST /interview-sessions` with `resume_id` + `"difficulty":"auto"` (correctly resolved `starting_difficulty` from the live gap-analysis, `personalization` populated from live-extracted skills/projects/experience).
+- Auth smoke-tested against the rebuilt container: register → duplicate-register (`409`) → `/users/me` with/without token (`200`/`401`) → login (`200`) → refresh (`200`) → replay old refresh token (`401`) — Module 2 unaffected.
+- Grepped the full `docker compose logs backend` output from this session for passwords, bearer tokens, the configured API key, and the synthetic resume's own PII (candidate name, employer name) — no matches on any.
+- Found (not fixed, explicitly out of scope): a separate, pre-existing Gemini **embedding** 404 (`text-embedding-004` not found for `embedContent` on API version `v1beta`) — logged during the same live run, unrelated to the structured-output bug, doesn't block anything already verified above. See "Known limitations" in the Resume Intelligence section.
+
 ## Explicitly not in this milestone
 
 **Module 2 (Authentication):** no `POST /auth/verify-email` or `PATCH /users/me` (not in the required endpoint list); no production email provider; Google OAuth needs real credentials to exercise end-to-end; no recruiter/admin endpoints yet (RBAC dependency exists and is tested, nothing depends on it yet — see Features.md, marked "Later").
 
-**Module 3 (Resume Intelligence):** no frontend, no Interview Planner, no LangGraph agents, no interview functionality — per the task, this module stops at the clean integration boundary (`app/services/resume/interview_context.py`) a future Interview Engine will call. No OCR for scanned PDFs (module §3, explicitly deferred). No live Gemini verification in this environment (no API key available — see "Gemini integration status" above). `resume_embeddings` is indexed but not queried by anything yet (module §14). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+**Module 3 (Resume Intelligence):** at the time this module shipped, no frontend, no Interview Planner, no LangGraph agents, no interview functionality — it stopped at the clean integration boundary (`app/services/resume/interview_context.py`) that Module 4 now calls. No OCR for scanned PDFs (module §3, explicitly deferred). `resume_embeddings` is indexed but not queried by anything yet (module §14). A real-Gemini-key resume upload was found broken (`google-genai` response-schema compatibility error) during Module 4's live verification and **has since been fixed** — see "Gemini structured-output schema fix" above. The Gemini **embedding** path is still broken (separate issue, 404 on `text-embedding-004`) — see "Known limitations" above.
+
+**Module 4 (Interview Planner):** no frontend. No `/interview-sessions/{id}/start`/`/current-turn`/`/answers`/`/abandon` — these require the LangGraph Supervisor, which is Module 5's scope (Roadmap.md); a planned interview can be created/listed/retrieved but never actually run through this module alone. No admin UI for companies/roles/templates (seed-file + CLI only, per Roadmap.md's stated scope). `resume_gap_analysis.target_role_id` remains unresolved (Module 3's gap-analysis endpoint still only accepts `role_key`). `roles`/`template_rounds` lack `created_at` (pre-existing Module 1 gap, not introduced or fixed here). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.

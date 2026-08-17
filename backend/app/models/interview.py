@@ -14,15 +14,17 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
 from app.models.enums import (
     CodeExecutionStatus,
     DifficultyLevel,
+    InterviewMode,
     QuestionSource,
     QuestionType,
+    RequestedDifficulty,
     RoundStatus,
     RoundType,
     SessionStatus,
@@ -37,8 +39,14 @@ class InterviewSession(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
     )
-    resume_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("resumes.id", ondelete="RESTRICT"), nullable=False
+    # Module 4 — relaxed to nullable: a generic (non-resume-discussion) mode
+    # may be planned with no resume at all (module §8). Pins the *exact*
+    # resume row/version used — Module 3 resume rows are never mutated after
+    # parsed_status=done (only is_active toggles), so this FK alone is
+    # sufficient for reproducibility; no separate "resume version" column is
+    # needed.
+    resume_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("resumes.id", ondelete="RESTRICT"), nullable=True
     )
     company_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("companies.id", ondelete="SET NULL"), nullable=True
@@ -57,10 +65,46 @@ class InterviewSession(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
         default=SessionStatus.NOT_STARTED,
     )
     current_round_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Module 4 — the *dynamic* difficulty. Set equal to starting_difficulty
+    # at plan time; Module 5's Difficulty Agent is the only thing that will
+    # ever change it afterward. Never confuse this with starting_difficulty
+    # below (module §7's explicit instruction).
     current_difficulty: Mapped[DifficultyLevel] = mapped_column(
         pg_enum(DifficultyLevel, name="interview_sessions_current_difficulty_enum"),
         nullable=False,
     )
+    # Module 4 — what the candidate actually asked for (an explicit level,
+    # or AUTO). Persisted verbatim, independent of what it resolved to.
+    requested_difficulty: Mapped[RequestedDifficulty] = mapped_column(
+        pg_enum(RequestedDifficulty, name="interview_sessions_requested_difficulty_enum"),
+        nullable=False,
+        default=RequestedDifficulty.AUTO,
+    )
+    # Module 4 — the resolved starting difficulty at plan time: requested_difficulty
+    # as-is if explicit, or the deterministic AUTO resolution (module §7) if
+    # requested_difficulty=AUTO. Immutable after creation — an audit-safe
+    # snapshot distinct from current_difficulty, which Module 5 will mutate.
+    starting_difficulty: Mapped[DifficultyLevel] = mapped_column(
+        pg_enum(DifficultyLevel, name="interview_sessions_starting_difficulty_enum"),
+        nullable=False,
+    )
+    # Module 4 — which candidate-facing mode this session was planned as.
+    # Inherited from (and, if the request specified one, validated against)
+    # interview_templates.mode at plan time.
+    mode: Mapped[InterviewMode] = mapped_column(
+        pg_enum(InterviewMode, name="interview_sessions_mode_enum"),
+        nullable=False,
+        default=InterviewMode.FULL_MOCK,
+    )
+    # Module 4 — the immutable plan snapshot (module §9): denormalized
+    # company/role/template/round labels + the resume-derived personalization
+    # context (skills/focus areas/evidence, never raw resume text or PII)
+    # captured at plan time. Round order/weights/planned-difficulty
+    # themselves stay normalized in interview_rounds (queryable, matches
+    # Database.md's existing snapshot pattern there) — this column only
+    # carries what would otherwise require re-joining mutable catalog/resume
+    # tables to redisplay a plan that must never silently change.
+    plan_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     langgraph_thread_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -60,27 +60,43 @@ Resume parsing runs through the Job Runner (§8.1 of Architecture.md); `GET /res
 
 ## 3. Interview Planning
 
+**Status: implemented in Module 4** — companies/roles/templates are read-only, shared catalog data (not ownership-scoped); every route still requires authentication. See [backend/README.md](../backend/README.md)'s "Interview Planner (Module 4)" section for the full design writeup.
+
 | Method | Path | Description | Auth |
 |---|---|---|---|
-| GET | `/companies` | List companies | required |
-| GET | `/companies/{company_id}/roles` | Roles offered at a company | required |
+| GET | `/companies` | List active companies | required |
+| GET | `/companies/{company_id}/roles` | Roles offered at a company (404 if the company is missing/inactive) | required |
 | GET | `/roles` | List generic (company-agnostic) + all roles, filterable by `?level=` | required |
-| GET | `/roles/{role_id}/templates` | Interview templates available for a role (optionally filter `?company_id=`) | required |
+| GET | `/roles/{role_id}/templates` | Interview templates available for a role, filterable by `?company_id=` and `?mode=` | required |
 | GET | `/templates/{template_id}` | Template detail including ordered `template_rounds` | required |
+
+**Companies are InterviewIQ preparation profiles, not official company hiring-process specifications.** Each `CompanyOut.interview_style_notes` field says so explicitly (e.g. "InterviewIQ's preparation profile for Google-style loops, based on publicly discussed patterns... Not Google's official interview process and not affiliated with or endorsed by Google.") — this applies to every seeded company (Google, Microsoft, Amazon, Atlassian, OpenAI). Only `general` (company-agnostic) makes no company-likeness claim at all.
+
+Inactive companies/roles/templates are excluded from every listing above and from `POST /interview-sessions` (§4) — `is_active` is how a catalog entry is retired without deleting history that existing interview sessions still reference (no soft-delete pattern needed here, matching [Database.md](Database.md) §0's "no soft-delete by default" convention).
 
 ---
 
 ## 4. Interview Sessions
 
+**Status: the planning subset below (creation, listing, retrieval, plan snapshot) is implemented in Module 4. `/start`, `/current-turn`, `/answers`, `/abandon` remain unimplemented — they require the LangGraph Supervisor, which is Module 5's scope (Roadmap.md).**
+
 | Method | Path | Description | Auth |
 |---|---|---|---|
-| POST | `/interview-sessions` | Create a session. Body: `{ resume_id, company_id?, role_id, template_id, difficulty_override? }` | required |
+| POST | `/interview-sessions` | Create an immutable interview plan. Body: `{ role_id, template_id, company_id?, mode?, difficulty?, resume_id? }` (see deviation note below) | required |
 | GET | `/interview-sessions` | List current user's sessions, filterable by `?status=` | required |
-| GET | `/interview-sessions/{id}` | Session detail (status, current round, current difficulty) | required |
-| POST | `/interview-sessions/{id}/start` | Transitions `not_started → in_progress`, Supervisor emits the first question | required |
-| GET | `/interview-sessions/{id}/current-turn` | Current question + round context (what the candidate should see right now) | required |
-| POST | `/interview-sessions/{id}/answers` | Submit a text answer to the current question — synchronous, returns evaluation + next question (§5.3 of Architecture.md) | required |
-| POST | `/interview-sessions/{id}/abandon` | Mark session `abandoned` | required |
+| GET | `/interview-sessions/{id}` | Session detail (status, current round, current/starting/requested difficulty) | required |
+| GET | `/interview-sessions/{id}/plan` | The full immutable plan snapshot: company/role/template labels, ordered rounds, difficulty resolution + reasons, resume-derived personalization (if any) | required |
+| POST | `/interview-sessions/{id}/start` | *(Module 5)* Transitions `not_started → in_progress`, Supervisor emits the first question | required |
+| GET | `/interview-sessions/{id}/current-turn` | *(Module 5)* Current question + round context (what the candidate should see right now) | required |
+| POST | `/interview-sessions/{id}/answers` | *(Module 5)* Submit a text answer to the current question — synchronous, returns evaluation + next question (§5.3 of Architecture.md) | required |
+| POST | `/interview-sessions/{id}/abandon` | *(Module 5)* Mark session `abandoned` | required |
+
+**Deviations from this document's original draft body**, both documented inline in `app/schemas/interview.py`:
+- `difficulty_override` → `difficulty`, an enum of `easy`/`medium`/`hard`/`auto` (default `auto`) rather than a bare optional override. `auto` resolves deterministically from the selected resume's already-computed `resume_gap_analysis.recommended_difficulty` (Module 3) when one is available and matches, or from the documented safe default (`medium`) otherwise — never via an LLM call. Both the raw request (`requested_difficulty`) and the resolved value (`starting_difficulty`) are persisted, since Module 5's Difficulty Agent will mutate a third, separate field (`current_difficulty`) during the interview itself.
+- Added optional `mode` (`full_mock`/`technical_only`/`coding_only`/`behavioral_only`/`resume_deep_dive`) — inherited from the selected template if omitted, and must match the template's own mode exactly if given (a plan request never dynamically re-filters a template's rounds).
+- `resume_id` is optional and, if omitted, falls back to the candidate's active analyzed resume; a resume is only strictly required when the mode is `resume_deep_dive` or the template includes a `resume_discussion` round. An explicitly-selected resume must belong to the requesting user (else `404`) and have `parsed_status=done` (else `409 RESUME_NOT_READY`) — never silently substituted.
+
+Every path above enforces resource ownership the same way §2 Resumes does — a session ID belonging to another user resolves as `404 RESOURCE_NOT_FOUND` (specifically `code=INTERVIEW_NOT_FOUND`) on every method, never `403`.
 
 ### `POST /interview-sessions/{id}/answers` — response shape
 

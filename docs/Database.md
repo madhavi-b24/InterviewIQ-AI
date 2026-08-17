@@ -209,7 +209,7 @@ Role-readiness + explainable interview-difficulty recommendation (module 3 §11�
 |---|---|---|
 | id | uuid | PK |
 | resume_id | uuid | FK → resumes.id, cascade, **unique** |
-| target_role_id | uuid | FK → roles.id, nullable — unused until Module 4 seeds `roles` |
+| target_role_id | uuid | FK → roles.id, `ON DELETE SET NULL`, nullable — **still unresolved**: Module 4 now seeds `roles`, but `POST /resumes/{id}/gap-analysis` (Module 3, unchanged) continues to accept `role_key` only and never populates this column. Left as a known open thread rather than silently wired up, since resolving it is a Module 3 change outside Module 4's scope. |
 | role_key | text | nullable — *(Module 3)* internal InterviewIQ competency-profile key (e.g. `backend_engineer`) used while `target_role_id` is unset |
 | missing_skills | jsonb | not null, default `[]` |
 | matching_skills | jsonb | not null, default `[]` — *(Module 3)* |
@@ -225,15 +225,18 @@ Role-readiness + explainable interview-difficulty recommendation (module 3 §11�
 
 ## 4. Interview Planning Domain
 
+**Status: implemented in Module 4.** These four tables were created empty (unused) by Module 1's initial migration; Module 4's migration (`7463f2f331f1_interview_planner`) is purely additive on top of them — new columns only, nothing dropped/renamed/narrowed except relaxing `interview_sessions.resume_id` to nullable (see §5). Seeded via `app/services/planning/data/catalog.json` + `app/db/seed_catalog.py` (idempotent upsert by natural key — safe to run repeatedly), not via migration data.
+
 ### `companies`
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | name | text | not null |
-| slug | text | unique, not null |
+| slug | text | unique, not null — also serves as the stable catalog "key" |
 | logo_url | text | nullable |
-| interview_style_notes | text | nullable — grounding context fed to Question Generator Agent |
+| interview_style_notes | text | nullable — grounding context fed to the future Question Generator Agent. **These are InterviewIQ preparation profiles based on public/general interview patterns, never a claim to reproduce a real company's actual/confidential process** — enforced by seed-data content, not a schema constraint. |
+| is_active | boolean | not null, default true — *(Module 4)* excluded from catalog listings and rejected as a plan target when false, without deleting history existing templates/sessions still reference |
 | created_at | timestamptz | not null |
 
 ### `roles`
@@ -241,10 +244,14 @@ Role-readiness + explainable interview-difficulty recommendation (module 3 §11�
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
-| company_id | uuid | FK → companies.id, nullable (null = generic/company-agnostic role) |
+| company_id | uuid | FK → companies.id, `ON DELETE SET NULL`, nullable (null = generic/company-agnostic role) |
 | title | text | not null |
 | level | enum(`intern`,`junior`,`mid`,`senior`,`staff`) | not null |
 | description | text | nullable |
+| role_key | text | nullable, indexed — *(Module 4)* the canonical link back to Module 3's internal competency-profile taxonomy (`app/services/resume/data/role_profiles.json` — `software_engineer`, `backend_engineer`, `ai_engineer`, `ml_engineer`, `data_engineer`). One taxonomy, not two: AUTO difficulty and personalization both key off this instead of re-deriving a role identity from `title`. |
+| is_active | boolean | not null, default true — *(Module 4)* same semantics as `companies.is_active` |
+
+**Known pre-Module-4 gap:** unlike every other table in this document, `roles` (and `template_rounds` below) has no `created_at`, contradicting §0's "every table has `created_at`" convention. This predates Module 4 — both tables were created this way by Module 1's initial migration — and is left as-is rather than altered, since it doesn't block any Module 4 functionality and touching Module 1's already-approved baseline tables is out of this module's scope.
 
 ### `interview_templates`
 
@@ -253,11 +260,12 @@ A named, reusable round plan. A single (company, role) pair can have multiple te
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
-| company_id | uuid | FK → companies.id, nullable |
-| role_id | uuid | FK → roles.id, not null |
+| company_id | uuid | FK → companies.id, `ON DELETE SET NULL`, nullable |
+| role_id | uuid | FK → roles.id, restrict, not null |
 | name | text | not null — e.g. "Onsite Loop", "Phone Screen" |
 | description | text | nullable |
 | default_difficulty | enum(`easy`,`medium`,`hard`) | not null |
+| mode | enum(`full_mock`,`technical_only`,`coding_only`,`behavioral_only`,`resume_deep_dive`) | not null, default `full_mock` — *(Module 4)* which candidate-facing mode this named round plan represents; a plan request either inherits this or must match it exactly, so round selection stays entirely data-driven (never re-filtered dynamically by a future agent) |
 | is_active | boolean | not null, default true |
 | created_at | timestamptz | not null |
 
@@ -275,7 +283,7 @@ Normalized round plan — replaces the earlier `rounds jsonb` design. Each row i
 | is_required | boolean | not null, default true |
 | difficulty_override | enum(`easy`,`medium`,`hard`) | nullable — overrides template default for this round only |
 
-Unique: `(template_id, sequence_no)`. Index: `(template_id, round_type)` — supports "which templates include a coding round" queries.
+Unique: `(template_id, sequence_no)`. Index: `(template_id, round_type)` — supports "which templates include a coding round" queries. See the `roles` section above for the missing-`created_at` note, which applies here too.
 
 ---
 
@@ -283,25 +291,33 @@ Unique: `(template_id, sequence_no)`. Index: `(template_id, round_type)` — sup
 
 ### `interview_sessions`
 
-The aggregate root for a single interview attempt.
+The aggregate root for a single interview attempt. **Planning fields (everything through `plan_snapshot`) are implemented in Module 4; execution fields (`current_round_sequence`, `started_at`, `completed_at`, and every status beyond `not_started`) are only ever written by Module 5**, which doesn't exist yet — Module 4 only ever creates `not_started` sessions.
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | user_id | uuid | FK → users.id, restrict |
-| resume_id | uuid | FK → resumes.id, restrict |
-| company_id | uuid | FK → companies.id, nullable |
-| role_id | uuid | FK → roles.id, not null |
+| resume_id | uuid | FK → resumes.id, restrict, **nullable** — *(Module 4)* relaxed from Module 1's original not-null: a generic (non-resume-discussion) mode may be planned with no resume at all. Pins the exact resume row/version used; Module 3 resumes are never mutated after `parsed_status=done` (only `is_active` toggles), so this FK alone is sufficient for reproducibility. |
+| company_id | uuid | FK → companies.id, `ON DELETE SET NULL`, nullable |
+| role_id | uuid | FK → roles.id, restrict, not null |
 | template_id | uuid | FK → interview_templates.id, restrict |
 | status | enum(`not_started`,`in_progress`,`completed`,`abandoned`) | not null, default `not_started` |
 | current_round_sequence | int | not null, default 0 |
-| current_difficulty | enum(`easy`,`medium`,`hard`) | not null |
-| langgraph_thread_id | text | unique, not null — links to LangGraph checkpoint |
+| current_difficulty | enum(`easy`,`medium`,`hard`) | not null — the *dynamic* difficulty; set equal to `starting_difficulty` at plan time, mutated only by Module 5's future Difficulty Agent |
+| requested_difficulty | enum(`easy`,`medium`,`hard`,`auto`) | not null, default `auto` — *(Module 4)* what the candidate actually asked for, persisted verbatim regardless of what it resolved to |
+| starting_difficulty | enum(`easy`,`medium`,`hard`) | not null — *(Module 4)* the resolved starting difficulty at plan time: `requested_difficulty` as-is if explicit, or the deterministic AUTO resolution if `requested_difficulty=auto`. Immutable after creation — distinct from `current_difficulty`, which Module 5 will mutate. |
+| mode | enum(`full_mock`,`technical_only`,`coding_only`,`behavioral_only`,`resume_deep_dive`) | not null, default `full_mock` — *(Module 4)* inherited from (and, if the plan request specified one, validated against) `interview_templates.mode` at plan time |
+| plan_snapshot | jsonb | not null, default `{}` — *(Module 4)* the immutable plan snapshot (see the design note below) |
+| langgraph_thread_id | text | unique, not null — links to LangGraph checkpoint. Module 4 assigns a `planned:<uuid>` placeholder at plan time (satisfies the NOT NULL/unique constraint for a session that has been planned but not started); Module 5 assigns the real checkpoint thread id when the interview actually starts. |
 | started_at | timestamptz | nullable |
 | completed_at | timestamptz | nullable |
 | created_at | timestamptz | not null |
 
 Index: `(user_id, status)` for dashboard "in-progress interviews" queries.
+
+**`plan_snapshot` design note (Module 4):** round order/weights/planned-difficulty stay normalized in `interview_rounds` below (queryable, matches this document's pre-existing snapshot pattern there) — `plan_snapshot` only carries what would otherwise require re-joining mutable `companies`/`roles`/`interview_templates`/resume tables to redisplay a plan that must never silently change: denormalized company/role/template labels, the resolved-difficulty reasons, and (for resume-aware plans) a resume-derived personalization block — canonical skills, focus areas, matching/missing skills, project titles, and up to 20 evidence snippets, deliberately capped so the snapshot stays a compact record rather than a copy of the whole resume (the full resume data still lives on the `resume_id` row itself). No raw resume text or contact info ever enters this column. This hybrid (normalized rounds + JSONB label/personalization snapshot) was chosen over either extreme — a single `rounds jsonb` blob would lose the per-round-type query support this document's Decisions Log already committed to for `template_rounds`; fully normalizing the label/personalization data would mean adding several more snapshot tables for data that is only ever read back whole, never queried by field.
+
+`app/services/interview/execution_context.py::build_execution_context()` is the one function allowed to read `plan_snapshot` + `interview_rounds` to build `InterviewExecutionContext` — the sole Module 4 → Module 5 contract (module §19). It never re-queries `companies`/`roles`/`interview_templates`/`resumes` live, which is what makes the snapshot's immutability guarantee actually hold for whatever LangGraph agent consumes it.
 
 ### `interview_rounds`
 

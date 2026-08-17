@@ -1,0 +1,204 @@
+{
+  "_comment": "Module 4 — MVP interview-planning catalog. InterviewIQ preparation profiles, NOT official/confidential company hiring-process specifications (module §2). Adding a company/role/template is a data change here, never a code change — app/services/planning/catalog_seed.py only reads this file. role_key values must match app/services/resume/data/role_profiles.json's keys exactly (one taxonomy, not two).",
+
+  "companies": [
+    {
+      "slug": "general",
+      "name": "General / Company-Agnostic",
+      "interview_style_notes": "A balanced, company-agnostic interview loop covering the fundamentals most software interviews share. Not modeled on any single employer.",
+      "is_active": true
+    },
+    {
+      "slug": "google",
+      "name": "Google",
+      "interview_style_notes": "InterviewIQ's preparation profile for Google-style loops, based on publicly discussed patterns (algorithmic coding depth, system design at senior levels, Googleyness/leadership behavioral framing). Not Google's official interview process and not affiliated with or endorsed by Google.",
+      "is_active": true
+    },
+    {
+      "slug": "microsoft",
+      "name": "Microsoft",
+      "interview_style_notes": "InterviewIQ's preparation profile for Microsoft-style loops, based on publicly discussed patterns (practical coding, design, collaboration-focused behavioral rounds). Not Microsoft's official interview process and not affiliated with or endorsed by Microsoft.",
+      "is_active": true
+    },
+    {
+      "slug": "amazon",
+      "name": "Amazon",
+      "interview_style_notes": "InterviewIQ's preparation profile for Amazon-style loops, based on publicly discussed patterns (Leadership-Principles-framed behavioral questions alongside technical rounds). Not Amazon's official interview process and not affiliated with or endorsed by Amazon.",
+      "is_active": true
+    },
+    {
+      "slug": "atlassian",
+      "name": "Atlassian",
+      "interview_style_notes": "InterviewIQ's preparation profile for Atlassian-style loops, based on publicly discussed patterns (values-driven behavioral rounds, pragmatic technical/system design). Not Atlassian's official interview process and not affiliated with or endorsed by Atlassian.",
+      "is_active": true
+    },
+    {
+      "slug": "openai",
+      "name": "OpenAI",
+      "interview_style_notes": "InterviewIQ's preparation profile for OpenAI-style loops, based on publicly discussed patterns (strong ML/engineering fundamentals, applied research framing). Not OpenAI's official interview process and not affiliated with or endorsed by OpenAI.",
+      "is_active": true
+    }
+  ],
+
+  "roles": [
+    { "natural_key": "general_software_engineer", "company_slug": null, "role_key": "software_engineer", "title": "Software Engineer / SDE", "level": "mid", "description": "General-purpose software engineering role — algorithms, system fundamentals, and applied coding.", "is_active": true },
+    { "natural_key": "general_backend_engineer", "company_slug": null, "role_key": "backend_engineer", "title": "Backend Engineer", "level": "mid", "description": "Server-side systems, APIs, data stores, and reliability.", "is_active": true },
+    { "natural_key": "general_ai_engineer", "company_slug": null, "role_key": "ai_engineer", "title": "AI Engineer", "level": "mid", "description": "Applied AI/LLM systems engineering.", "is_active": true },
+    { "natural_key": "general_ml_engineer", "company_slug": null, "role_key": "ml_engineer", "title": "ML Engineer", "level": "mid", "description": "Classical/deep ML model development and productionization.", "is_active": true },
+    { "natural_key": "general_data_engineer", "company_slug": null, "role_key": "data_engineer", "title": "Data Engineer", "level": "mid", "description": "Data pipelines, warehousing, and large-scale data infrastructure.", "is_active": true },
+    { "natural_key": "google_software_engineer", "company_slug": "google", "role_key": "software_engineer", "title": "Software Engineer", "level": "mid", "description": "Google-flavored software engineering loop — algorithmic depth emphasized.", "is_active": true },
+    { "natural_key": "amazon_software_engineer", "company_slug": "amazon", "role_key": "software_engineer", "title": "Software Engineer", "level": "mid", "description": "Amazon-flavored software engineering loop — Leadership-Principles-framed behavioral rounds.", "is_active": true }
+  ],
+
+  "templates": [
+    {
+      "natural_key": "general_swe_full_mock",
+      "company_slug": null,
+      "role_natural_key": "general_software_engineer",
+      "name": "Full Mock Interview",
+      "description": "A complete end-to-end mock loop: introduction, resume discussion, technical, coding, and behavioral.",
+      "mode": "full_mock",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.05, "is_required": true, "difficulty_override": null },
+        { "round_type": "resume_discussion", "sequence_no": 2, "weight": 0.15, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 3, "weight": 0.30, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 4, "weight": 0.35, "is_required": true, "difficulty_override": null },
+        { "round_type": "behavioral", "sequence_no": 5, "weight": 0.15, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_backend_technical_mock",
+      "company_slug": null,
+      "role_natural_key": "general_backend_engineer",
+      "name": "Technical Mock",
+      "description": "Focused technical + coding loop for backend engineering practice, no behavioral round.",
+      "mode": "technical_only",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.10, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 2, "weight": 0.60, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 3, "weight": 0.30, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_swe_coding_practice",
+      "company_slug": null,
+      "role_natural_key": "general_software_engineer",
+      "name": "Coding Practice",
+      "description": "A single coding round for focused algorithmic practice.",
+      "mode": "coding_only",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "coding", "sequence_no": 1, "weight": 1.00, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_swe_behavioral_prep",
+      "company_slug": null,
+      "role_natural_key": "general_software_engineer",
+      "name": "Behavioral Prep",
+      "description": "Introduction plus a full behavioral round — no technical content.",
+      "mode": "behavioral_only",
+      "default_difficulty": "easy",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.20, "is_required": true, "difficulty_override": null },
+        { "round_type": "behavioral", "sequence_no": 2, "weight": 0.80, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_swe_resume_deep_dive",
+      "company_slug": null,
+      "role_natural_key": "general_software_engineer",
+      "name": "Resume Deep Dive",
+      "description": "A single resume-discussion round grounded entirely in the candidate's own resume evidence. Requires an analyzed resume.",
+      "mode": "resume_deep_dive",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "resume_discussion", "sequence_no": 1, "weight": 1.00, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_ai_engineer_technical_mock",
+      "company_slug": null,
+      "role_natural_key": "general_ai_engineer",
+      "name": "Technical Mock",
+      "description": "Focused technical + coding loop for AI engineering practice.",
+      "mode": "technical_only",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.10, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 2, "weight": 0.60, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 3, "weight": 0.30, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_ml_engineer_technical_mock",
+      "company_slug": null,
+      "role_natural_key": "general_ml_engineer",
+      "name": "Technical Mock",
+      "description": "Focused technical + coding loop for ML engineering practice.",
+      "mode": "technical_only",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.10, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 2, "weight": 0.60, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 3, "weight": 0.30, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "general_data_engineer_technical_mock",
+      "company_slug": null,
+      "role_natural_key": "general_data_engineer",
+      "name": "Technical Mock",
+      "description": "Focused technical + coding loop for data engineering practice.",
+      "mode": "technical_only",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.10, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 2, "weight": 0.60, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 3, "weight": 0.30, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "google_swe_full_mock",
+      "company_slug": "google",
+      "role_natural_key": "google_software_engineer",
+      "name": "Google SWE — Full Mock",
+      "description": "InterviewIQ's Google-style full loop: heavier algorithmic coding weight and a system design round.",
+      "mode": "full_mock",
+      "default_difficulty": "hard",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.05, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 2, "weight": 0.20, "is_required": true, "difficulty_override": null },
+        { "round_type": "coding", "sequence_no": 3, "weight": 0.40, "is_required": true, "difficulty_override": "hard" },
+        { "round_type": "system_design", "sequence_no": 4, "weight": 0.25, "is_required": true, "difficulty_override": null },
+        { "round_type": "behavioral", "sequence_no": 5, "weight": 0.10, "is_required": true, "difficulty_override": null }
+      ]
+    },
+    {
+      "natural_key": "amazon_swe_behavioral_technical",
+      "company_slug": "amazon",
+      "role_natural_key": "amazon_software_engineer",
+      "name": "Amazon SWE — Behavioral + Technical",
+      "description": "InterviewIQ's Amazon-style loop: Leadership-Principles-framed behavioral round alongside a technical round.",
+      "mode": "full_mock",
+      "default_difficulty": "medium",
+      "is_active": true,
+      "rounds": [
+        { "round_type": "introduction", "sequence_no": 1, "weight": 0.05, "is_required": true, "difficulty_override": null },
+        { "round_type": "behavioral", "sequence_no": 2, "weight": 0.35, "is_required": true, "difficulty_override": null },
+        { "round_type": "technical", "sequence_no": 3, "weight": 0.60, "is_required": true, "difficulty_override": null }
+      ]
+    }
+  ]
+}

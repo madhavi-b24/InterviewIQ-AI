@@ -27,6 +27,8 @@ from app.models.user import User
 from app.services.auth_service import AuthService
 from app.services.email import ConsoleEmailProvider, EmailProvider
 from app.services.oauth import GoogleOAuthProvider
+from app.services.planning.catalog_service import CatalogService
+from app.services.planning.interview_planner import InterviewPlannerService
 from app.services.resume.factories import build_embedding_index, build_resume_storage
 from app.services.resume.resume_service import ResumeService
 from app.storage.base import ResumeStorage
@@ -152,6 +154,22 @@ def get_resume_service(
 
 
 ResumeServiceDep = Annotated[ResumeService, Depends(get_resume_service)]
+
+
+def get_catalog_service(session: DbSession) -> CatalogService:
+    return CatalogService(session)
+
+
+CatalogServiceDep = Annotated[CatalogService, Depends(get_catalog_service)]
+
+
+def get_interview_planner_service(session: DbSession) -> InterviewPlannerService:
+    return InterviewPlannerService(session)
+
+
+InterviewPlannerServiceDep = Annotated[
+    InterviewPlannerService, Depends(get_interview_planner_service)
+]
 
 
 async def db_healthcheck(session: DbSession) -> bool:
