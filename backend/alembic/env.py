@@ -19,6 +19,25 @@ config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
 
 target_metadata = Base.metadata
 
+# Module 5 — LangGraph's own checkpoint tables (app/agents/checkpointer.py,
+# created by AsyncPostgresSaver.setup(), not by us) live in this same
+# Postgres database but are a separate, library-owned schema — never part
+# of Base.metadata. Without this filter, `alembic check`/`--autogenerate`
+# sees them as "extra tables not in our metadata" and proposes DROP TABLE
+# migrations for infrastructure we don't own and must never touch. Found
+# by actually running `alembic check` after these tables existed, not by
+# inspection — see backend/README.md's Module 5 verification notes.
+_LANGGRAPH_CHECKPOINT_TABLES = {
+    "checkpoints",
+    "checkpoint_blobs",
+    "checkpoint_writes",
+    "checkpoint_migrations",
+}
+
+
+def _include_object(object_, name, type_, reflected, compare_to):
+    return not (type_ == "table" and name in _LANGGRAPH_CHECKPOINT_TABLES)
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
@@ -27,13 +46,16 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=_include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def _do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection, target_metadata=target_metadata, include_object=_include_object
+    )
     with context.begin_transaction():
         context.run_migrations()
 

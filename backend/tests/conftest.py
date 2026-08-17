@@ -18,6 +18,9 @@ from app.cache.redis_client import get_redis_pool  # noqa: E402
 from app.db.session import get_engine, get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
 from app.services.email import EmailProvider  # noqa: E402
+from app.services.interview_intelligence.fake_provider import (  # noqa: E402
+    get_fake_interview_agent_provider,
+)
 from app.services.planning.catalog_seed import seed_catalog  # noqa: E402
 from app.services.resume_intelligence.fake_provider import (  # noqa: E402
     get_fake_resume_intelligence_provider,
@@ -73,6 +76,10 @@ async def _clean_state_between_tests() -> AsyncGenerator[None]:
     # Reset here so one test's "simulate a Gemini timeout" can't leak into
     # the next test's upload.
     get_fake_resume_intelligence_provider().reset()
+    # Module 5 — same rationale: the graph's nodes call this provider
+    # directly (not through app.dependency_overrides), so one test's
+    # forced score/failure flags must never leak into the next.
+    get_fake_interview_agent_provider().reset()
     yield
     await engine.dispose()
     await get_redis_pool().disconnect()

@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     # Same "fake" rationale as RESUME_INTELLIGENCE_PROVIDER above.
     RESUME_EMBEDDING_PROVIDER: Literal["gemini", "fake"] = "gemini"
 
+    # --- Interview Engine (Module 5) -------------------------------------
+    # InterviewAgentProvider (app/services/interview_intelligence/) — the
+    # LLM-backed seam behind question generation, follow-ups, and
+    # evaluation. Same "fake" rationale/production-guard as
+    # RESUME_INTELLIGENCE_PROVIDER above (see
+    # app/services/interview_intelligence/factories.py).
+    INTERVIEW_ENGINE_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    INTERVIEW_ENGINE_TIMEOUT_SECONDS: int = 45
+
 
 @lru_cache
 def get_settings() -> Settings:

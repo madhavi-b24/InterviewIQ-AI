@@ -1,6 +1,6 @@
 # InterviewIQ AI — Backend
 
-FastAPI backend for InterviewIQ AI. **Module 1** built the architecture, database schema, and infrastructure wiring. **Module 2** added production authentication and user identity. **Module 3** added Resume Intelligence: authenticated PDF upload, secure validation, deterministic text extraction, section detection, evidence-grounded structured extraction via Gemini, skill normalization, role-readiness analysis, and an explainable interview-difficulty recommendation. **Module 4** (this state of the repo) adds the Interview Planner: a candidate-facing catalog of companies/roles/interview templates and a deterministic planning service that turns a (company, role, template, mode, difficulty, resume) selection into an immutable interview plan for the future LangGraph Interview Engine to execute. See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next, and [../docs/Architecture.md](../docs/Architecture.md) / [../docs/Database.md](../docs/Database.md) / [../docs/API.md](../docs/API.md) for the design this implements.
+FastAPI backend for InterviewIQ AI. **Module 1** built the architecture, database schema, and infrastructure wiring. **Module 2** added production authentication and user identity. **Module 3** added Resume Intelligence: authenticated PDF upload, secure validation, deterministic text extraction, section detection, evidence-grounded structured extraction via Gemini, skill normalization, role-readiness analysis, and an explainable interview-difficulty recommendation. **Module 4** added the Interview Planner: a candidate-facing catalog of companies/roles/interview templates and a deterministic planning service that turns a (company, role, template, mode, difficulty, resume) selection into an immutable interview plan. **Module 5** (this state of the repo) adds the Interview Engine itself: a LangGraph-orchestrated, multi-agent adaptive interview that executes a Module 4 plan turn by turn — question generation, evaluation, communication scoring, and deterministic difficulty adaptation, all backed by real Postgres persistence. See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next, and [../docs/Architecture.md](../docs/Architecture.md) / [../docs/Database.md](../docs/Database.md) / [../docs/API.md](../docs/API.md) for the design this implements.
 
 ## Stack
 
@@ -144,14 +144,17 @@ Every table in Database.md §2–§8 has a corresponding model. Split by domain,
 | `repositories/user.py` | `UserRepository` (`get_by_email`, `get_by_google_id`), `RefreshTokenRepository` (`get_by_token_hash`, `revoke`), `PasswordResetTokenRepository` (`get_by_token_hash`, `mark_used`) — the first concrete repositories, added for Module 2's auth queries. |
 | `repositories/resume.py` | *(Module 3)* `ResumeRepository` — every lookup takes `user_id` and filters by it in the query itself (`get_owned`, `get_owned_with_children`, `get_active_for_user`, ...), which is what makes ownership enforcement a property of the query, not something a caller could forget. |
 | `repositories/planning.py` | *(Module 4)* `CompanyRepository`/`RoleRepository`/`InterviewTemplateRepository` — catalog data, so no ownership filter; `is_active` is filtered in-query instead, same rationale as ownership filtering above. |
-| `repositories/interview.py` | *(Module 4)* `InterviewSessionRepository` — `get_owned`/`list_owned`, same ownership-in-query pattern as `ResumeRepository`. |
+| `repositories/interview.py` | `InterviewSessionRepository` — `get_owned`/`list_owned` (Module 4) plus *(Module 5)* `get_owned_for_update` (row lock for concurrent-submission safety); `InterviewRoundRepository`, `QuestionRepository`, `AnswerRepository` (Module 5). |
+| `repositories/evaluation.py` | *(Module 5)* `AnswerEvaluationRepository` — `get_by_answer_id` (idempotency check), `list_for_session` (interview-wide running score aggregation). First repository to write into `app/models/evaluation.py`, modeled ahead of time since Module 1. |
 | `services/auth_service.py` | `AuthService` — the auth use-case layer: register, login, refresh (with rotation), logout, Google login/register, password reset request/confirm. Owns its own transactions (one commit per public method); routers call exactly these methods, never SQLAlchemy or `app.core.security` directly. |
 | `services/email.py` | `EmailProvider` protocol + `ConsoleEmailProvider` (the only implementation right now — see "Password reset strategy" below). |
 | `services/oauth.py` | `GoogleOAuthProvider` — Authorization Code flow boundary (`build_authorization_url`, `exchange_code`) — see "Google OAuth status" below. |
 | `services/resume/` | *(Module 3)* The deterministic pipeline stages — see "Resume Intelligence (Module 3)" below for the full file-by-file breakdown. |
 | `services/resume_intelligence/` | *(Module 3)* The LLM-backed seam: `ResumeIntelligenceProvider`/`EmbeddingProvider` protocols + Gemini/fake implementations. |
 | `services/planning/` | *(Module 4)* `catalog_service.py` (`CatalogService`, read-only browse), `interview_planner.py` (`InterviewPlannerService.create_plan()` — the planning use case), `catalog_seed.py` (idempotent upsert of `data/catalog.json`) — see "Interview Planner (Module 4)" below. |
-| `services/interview/execution_context.py` | *(Module 4)* `build_execution_context()` — the Module 4 → Module 5 boundary (`InterviewExecutionContext`); not wired to any endpoint yet. |
+| `services/interview/execution_context.py` | `build_execution_context()` — the Module 4 → Module 5 boundary (`InterviewExecutionContext`). *(Module 5)* Now genuinely consumed — see `execution_service.py` below. |
+| `services/interview/execution_service.py` | *(Module 5)* `InterviewExecutionService` — the execution use case: `start_interview`/`get_current_turn`/`submit_answer`/`abandon`. Same shape as `InterviewPlannerService` (constructor takes only `AsyncSession`, builds its own repositories). The only caller of `build_interview_graph()`; owns the two-phase transaction/locking/idempotency design — see "Interview Engine (Module 5)" below. |
+| `services/interview_intelligence/` | *(Module 5)* The Interview Engine's LLM-backed seam, mirroring `services/resume_intelligence/` file-for-file: `provider.py` (`InterviewAgentProvider` Protocol — `generate_question`/`generate_follow_up`/`evaluate_technical`/`evaluate_communication`), `schemas.py` (Gemini structured-output contracts, written with the "no non-None `Field(default=...)`" rule from day one), `gemini_provider.py` (real implementation), `fake_provider.py` (deterministic, test-only), `factories.py` (config-driven selection). |
 
 ### `app/jobs/`, `app/execution/` — the two pluggable-backend seams
 
@@ -165,30 +168,37 @@ Both follow the same shape: a `Protocol` + config-selected implementation, per A
 | `execution/base.py` | `CodeExecutor` protocol + `TestCase`/`TestCaseResult` dataclasses. |
 | `execution/docker_sandbox.py` | `DockerSandboxExecutor` — the MVP backend selected by `CODE_EXECUTION_BACKEND=docker_sandbox`. Its `run()` raises `NotImplementedError`; real sandboxing (network isolation, resource limits) is Module 6, not this scaffold. |
 
-### `app/agents/` — LangGraph wiring, no agents yet
+### `app/agents/` — LangGraph wiring (Module 5)
 
 | File | Purpose |
 |---|---|
-| `state.py` | `InterviewState` TypedDict — the shared graph state shape from Architecture.md §5.2. Field shapes only. |
-| `checkpointer.py` | `get_checkpointer()` — wires LangGraph's `AsyncPostgresSaver` to our `DATABASE_URL` (translated to a psycopg-style conninfo string, since the checkpointer uses `psycopg`, not `asyncpg`). This is real, working infra: connecting persistence to Postgres, not agent behavior. |
-| `graph.py` | `build_interview_graph()` — stub, raises `NotImplementedError`. The Supervisor and the eight other agents from Architecture.md §5.1 are Module 5 work. |
+| `state.py` | `InterviewState` TypedDict — the graph's transient execution state (Architecture.md §5.2). Every field carries a one-line "why this exists" comment; rebuilt fresh from Postgres every turn, never trusted from a stale checkpoint for a durable fact. |
+| `policy.py` | Every deterministic, non-LLM decision rule in one place: `DEFAULT_QUESTIONS_PER_ROUND`, `MAX_FOLLOW_UPS_PER_QUESTION`, `compute_difficulty_signal`/`apply_difficulty_signal` (the adaptive-difficulty threshold policy), `CODING_ROUND_SKIP_REASON`. |
+| `checkpointer.py` | `get_checkpointer()` — wires LangGraph's `AsyncPostgresSaver` to our `DATABASE_URL`. Also carries a Windows-only fix (`asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy)`) for a real bug found by actually running this code — see "What was actually verified" below. |
+| `graph.py` | `build_interview_graph(provider, checkpointer)` — compiles the real `StateGraph(InterviewState)`: 8 nodes, explicit conditional-edge routing, no giant single node. See "Interview Engine (Module 5)" below for the full graph shape. |
+| `nodes/supervisor.py` | Supervisor Agent — `route_entry` (trigger-based routing), `decide_next_action` (the FOLLOW_UP/NEXT_QUESTION/NEXT_ROUND/COMPLETE decision, deterministic threshold logic over structured signals, never an LLM-chosen transition). |
+| `nodes/round_management.py` | Round-transition mechanics split out from the Supervisor's decision — advances `round_plan` position, skips `coding` rounds (Module 6 boundary) with a logged reason, never fakes execution. |
+| `nodes/question_generator.py` / `nodes/interview_agent.py` | Question Generator Agent (fresh round-opening questions) / Interview Agent (follow-ups grounded in the specific reason flagged) — thin adapters to `InterviewAgentProvider`, plus deterministic duplicate-question avoidance (one bounded retry). |
+| `nodes/evaluation.py` / `nodes/communication.py` | Evaluation Agent (technical/problem_solving) / Communication Agent (communication/confidence — observable phrasing only, never a psychological inference). |
+| `nodes/difficulty.py` | Difficulty Agent — pure Python, applies `policy.py`'s threshold rule; also finalizes the turn's merged evaluation summary and running score aggregates. |
+| `nodes/knowledge.py` | Knowledge Agent — deterministic (no LLM call, no ChromaDB dependency for MVP), assembles grounding text from resume evidence + role topic hints. Not a graph node — a plain function other nodes call inline. |
 
 ### `app/api/` — HTTP layer
 
 | File | Purpose |
 |---|---|
-| `deps.py` | Every shared FastAPI dependency: `DbSession`, `RedisClient`, `get_current_user`/`CurrentUser` (decodes a bearer access JWT, loads the `User` row), `require_role(*roles)` (403 role-authorization factory), `get_auth_service`/`get_email_provider`/`get_google_oauth_provider` (config-driven), `get_job_runner`/`get_code_executor`, `get_resume_storage`/`get_resume_embedding_index`/`get_resume_service` (Module 3), `get_catalog_service`/`get_interview_planner_service` (Module 4), and `db_healthcheck`/`redis_healthcheck`. |
+| `deps.py` | Every shared FastAPI dependency: `DbSession`, `RedisClient`, `get_current_user`/`CurrentUser` (decodes a bearer access JWT, loads the `User` row), `require_role(*roles)` (403 role-authorization factory), `get_auth_service`/`get_email_provider`/`get_google_oauth_provider` (config-driven), `get_job_runner`/`get_code_executor`, `get_resume_storage`/`get_resume_embedding_index`/`get_resume_service` (Module 3), `get_catalog_service`/`get_interview_planner_service` (Module 4), `get_interview_execution_service`/`get_interview_agent_provider` (Module 5 — the provider is eagerly constructed, unlike the resume embedding index, since `/start`/`/answers` genuinely cannot proceed without it; `InterviewIntelligenceProviderError` is translated to a clean `503`, not left to leak as an unhandled exception), and `db_healthcheck`/`redis_healthcheck`. |
 | `v1/health.py` | `GET /health` — pings Postgres and Redis rather than just returning 200. |
 | `v1/auth.py` | Auth router (`/auth/*`) — register, login, refresh, logout, Google OAuth login/callback, password-reset request/confirm. Thin: parses the request, calls one `AuthService` method, shapes the response. |
 | `v1/users.py` | `GET /users/me` — returns `UserPublic` for the authenticated user. |
 | `v1/resumes.py` | *(Module 3)* Resume Intelligence router (`/resumes/*`) — upload, list, get, analysis, gap-analysis, delete. Thin, same shape as `v1/auth.py`. |
 | `v1/planning.py` | *(Module 4)* Catalog router (`/companies`, `/companies/{id}/roles`, `/roles`, `/roles/{id}/templates`, `/templates/{id}`) — read-only, not ownership-scoped. |
-| `v1/interviews.py` | *(Module 4)* Interview session router (`/interview-sessions/*`) — create plan, list, get, get plan. `/start`/`/current-turn`/`/answers`/`/abandon` deliberately not implemented here — Module 5. |
+| `v1/interviews.py` | Interview session router (`/interview-sessions/*`) — planning (create/list/get/plan, Module 4) plus *(Module 5)* `/start`, `/current-turn`, `/answers`, `/abandon`. `/code-submissions` deliberately not implemented — Module 6. |
 | `v1/router.py` | Aggregates `v1` routers. |
 
 ### `app/main.py`
 
-`create_app()`: FastAPI instance, CORS middleware from `settings.CORS_ORIGINS`, exception handlers registered, `v1` router mounted at `/api/v1`. `lifespan()` configures logging on startup and disposes the DB engine on shutdown.
+`create_app()`: FastAPI instance, CORS middleware from `settings.CORS_ORIGINS`, exception handlers registered, `v1` router mounted at `/api/v1`. `lifespan()` configures logging on startup, *(Module 5)* calls `AsyncPostgresSaver.setup()` once (idempotent — creates LangGraph's own checkpoint tables if they don't exist), and disposes the DB engine on shutdown.
 
 ### `alembic/`
 
@@ -200,17 +210,19 @@ Both follow the same shape: a `Protocol` + config-selected implementation, per A
 | `versions/..._add_password_reset_tokens.py` | Module 2 migration — adds `password_reset_tokens` only. No enum columns, so none of the initial migration's manual `DROP TYPE` handling applies here. |
 | `versions/..._resume_intelligence.py` | Module 3 migration — additive only (Database.md §3's Module-3-tagged columns/tables + the `resume_skills_category_enum` enum + the `uq_resumes_one_active_per_user` partial index). Verified `upgrade → downgrade → upgrade` and `alembic check` (no drift) on both `interviewiq` and `interviewiq_test`. |
 | `versions/..._interview_planner.py` | Module 4 migration — additive only on top of Module 1's already-existing-but-empty `companies`/`roles`/`interview_templates`/`interview_sessions` tables (Database.md §4's Module-4-tagged columns + 4 new enum types + relaxing `interview_sessions.resume_id` to nullable). Verified `upgrade → downgrade -1 → upgrade head` and `alembic check` (no drift) on `interviewiq`. |
+| `versions/..._interview_execution.py` | Module 5 migration — two additive nullable FK columns only: `questions.parent_question_id` (self-referential, follow-up tracking) and `interview_sessions.current_question_id` (explicit pending-turn pointer). Every other column Module 5 needs already existed from the Module 1 baseline. Hand-named the two FK constraints (autogenerate left them unnamed, which would have made `downgrade()`'s `drop_constraint(None, ...)` fail). Creates an intentional, documented circular FK reference (`interview_sessions` → `questions` → `interview_rounds` → `interview_sessions`), safe because both new columns are nullable with `ON DELETE SET NULL`. Verified `upgrade → downgrade -1 → upgrade head` and `alembic check` (no drift) on both `interviewiq` and `interviewiq_test`. |
 
 ### `tests/`
 
 | File | Purpose |
 |---|---|
-| `conftest.py` | Loads `.env.test` *before* anything imports `app.core.config` (import order matters here — see the `noqa: E402`s), then provides an `httpx.AsyncClient` fixture wired to the app via `ASGITransport` (no real HTTP server needed for tests). Also: an autouse fixture that truncates `users` (cascading to `refresh_tokens`/`password_reset_tokens`/every `resume_*` table) before every test, resets the fake resume-intelligence singleton (Module 3), and disposes the process-level DB engine after each test — see the fixture's docstring for why disposal is necessary on top of truncation (pytest-asyncio gives every test its own event loop; pooled asyncpg connections are bound to the loop that opened them). `FakeEmailProvider` — an in-memory `EmailProvider` double used via `app.dependency_overrides` so password-reset tests can read the raw reset token without it ever touching a log. |
+| `conftest.py` | Loads `.env.test` *before* anything imports `app.core.config` (import order matters here — see the `noqa: E402`s), then provides an `httpx.AsyncClient` fixture wired to the app via `ASGITransport` (no real HTTP server needed for tests). Also: an autouse fixture that truncates `users` (cascading to `refresh_tokens`/`password_reset_tokens`/every `resume_*` table) before every test, resets the fake resume-intelligence singleton (Module 3) *and the fake interview-agent singleton (Module 5)*, and disposes the process-level DB engine after each test — see the fixture's docstring for why disposal is necessary on top of truncation (pytest-asyncio gives every test its own event loop; pooled asyncpg connections are bound to the loop that opened them). `FakeEmailProvider` — an in-memory `EmailProvider` double used via `app.dependency_overrides` so password-reset tests can read the raw reset token without it ever touching a log. |
 | `test_health.py` | Exercises `GET /health` against real Postgres + Redis. |
 | `test_auth.py` | Registration, login, JWT (valid/invalid/expired/wrong-type), refresh rotation and reuse-rejection, `require_role`, logout + session revocation, password reset (request/confirm/single-use/token-invalidation-of-sessions), the Google OAuth boundary (503 when unconfigured, unverified-email link refusal), and targeted security assertions (Argon2 hash, hashed-not-raw token storage, redacted validation errors). 33 tests total. |
 | `pdf_fixtures.py` | *(Module 3)* Hand-rolled minimal-PDF byte builder (no reportlab dependency) — a small well-formed synthetic multi-page resume for a clearly fictional candidate ("Alex Rivera"), a blank/no-text PDF, and wrong-signature/truncated/empty byte fixtures for upload-validation tests. |
 | `test_resumes.py` | *(Module 3)* 44 tests across upload validation, ownership, extraction, structured analysis (incl. LLM malformed/timeout/failure paths via the fake provider), skill normalization, versioning, role readiness/difficulty, and security (path traversal, cross-user access). See "Resume Intelligence (Module 3)" below for the full breakdown. |
 | `test_interview_planning.py` | *(Module 4)* 31 tests across catalog browsing/filtering, plan creation (generic/resume-aware, manual/AUTO difficulty), resume selection/ownership/readiness, interview ownership, request validation, and plan-snapshot immutability. See "Interview Planner (Module 4)" below for the full breakdown. An autouse `_seed_catalog` fixture in `conftest.py` reseeds the MVP catalog (idempotent) before every test, since the per-test truncation fixture never touches catalog tables. |
+| `test_interview_execution.py` | *(Module 5)* 26 tests across start/answer/current-turn/abandon, follow-up generation and the follow-up cap, adaptive-difficulty thresholds (increase/decrease/maintain/clamping), round transitions (including coding-round skip), resume-grounded vs. generic question topics, ownership, no-internal-reasoning-exposed, and LLM-failure handling (provider failure preserves the answer, retry doesn't duplicate; timeout returns a clean error). Uses `FakeInterviewAgentProvider` (deterministic, no network) — never depends on live Gemini for the automated suite. An autouse `_ensure_checkpoint_tables` fixture calls `AsyncPostgresSaver.setup()` before every test in this file, since httpx's `ASGITransport` (used by the `client` fixture) never triggers FastAPI's lifespan, which is where this normally happens for a real deployment. |
 
 ---
 
@@ -448,9 +460,10 @@ app/db/seed_catalog.py (CLI: `uv run python -m app.db.seed_catalog`)
     (template_id, sequence_no)); round deletions are SAVEPOINT-scoped so a round still
     referenced by a live interview_rounds row (ON DELETE RESTRICT) is skipped, not fatal
 
-app/services/interview/execution_context.py — the Module 4 → Module 5 boundary; not wired to any
-endpoint yet. build_execution_context(session) reads only plan_snapshot + interview_rounds, never
-re-queries companies/roles/templates/resumes live.
+app/services/interview/execution_context.py — the Module 4 → Module 5 boundary, now genuinely
+consumed by InterviewExecutionService (Module 5, see "Interview Engine (Module 5)" below).
+build_execution_context(session) reads only plan_snapshot + interview_rounds, never re-queries
+companies/roles/templates/resumes live.
 ```
 
 Zero Gemini/LLM calls anywhere in this module — `InterviewPlannerService` is deterministic end to end. AUTO difficulty reuses a number Module 3 already computed; it never triggers a fresh model call.
@@ -483,7 +496,7 @@ Round order/weights/planned-difficulty stay **normalized** in `interview_rounds`
 
 ### `InterviewExecutionContext` — the Module 5 contract
 
-`app/services/interview/execution_context.py::build_execution_context(session)` returns `InterviewExecutionContext`: `interview_id`, `user_id`, `company_name`, `role_title`/`role_key`, `mode`, `rounds` (ordered, typed `RoundExecutionPlan`), `starting_difficulty`, `personalization` (typed `PersonalizationContext`, or `None`), and `resume` (a `ResumeReference` — just `resume_id`, never resume content). Built entirely from `plan_snapshot` + `interview_rounds`, both immutable once the plan exists — mirrors Module 3's `app/services/resume/interview_context.py` seam. A LangGraph agent that only ever calls this one function is structurally unable to reach `companies`/`roles`/`interview_templates`/`resumes` directly, satisfying module §19's "prevent LangGraph agents from directly querying many unrelated repositories" by construction. Not wired to any endpoint yet — Module 5's job.
+`app/services/interview/execution_context.py::build_execution_context(session)` returns `InterviewExecutionContext`: `interview_id`, `user_id`, `company_name`, `role_title`/`role_key`, `mode`, `rounds` (ordered, typed `RoundExecutionPlan`), `starting_difficulty`, `personalization` (typed `PersonalizationContext`, or `None`), and `resume` (a `ResumeReference` — just `resume_id`, never resume content). Built entirely from `plan_snapshot` + `interview_rounds`, both immutable once the plan exists — mirrors Module 3's `app/services/resume/interview_context.py` seam. A LangGraph agent that only ever calls this one function is structurally unable to reach `companies`/`roles`/`interview_templates`/`resumes` directly, satisfying module §19's "prevent LangGraph agents from directly querying many unrelated repositories" by construction. **Now genuinely consumed** — `InterviewExecutionService.start_interview`/`submit_answer` call it every turn (Module 5, see below).
 
 ### Security protections
 
@@ -497,8 +510,117 @@ Round order/weights/planned-difficulty stay **normalized** in `interview_rounds`
 - `roles` and `template_rounds` have no `created_at` column, unlike every other table in Database.md §0's stated convention — a pre-existing Module 1 gap, not something Module 4 introduced or fixed (touching Module 1's already-approved baseline tables was out of scope here). See Database.md §4.
 - `resume_gap_analysis.target_role_id` remains unresolved: Module 4 now seeds `roles`, but `POST /resumes/{id}/gap-analysis` (Module 3, unchanged) still only accepts/stores `role_key`. Wiring that resolution is a Module 3 change, not attempted here.
 - No admin UI for managing companies/roles/templates — catalog is seed-file + CLI only, matching Roadmap.md's stated Module 4 scope ("seeded via script, no admin UI yet").
-- `/interview-sessions/{id}/start`, `/current-turn`, `/answers`, `/abandon` are not implemented — they require the LangGraph Supervisor (Module 5). A planned interview can be created, listed, and retrieved, but never actually run, through this module alone.
+- `/interview-sessions/{id}/start`, `/current-turn`, `/answers`, `/abandon` were not implemented as of Module 4 — **since implemented, see "Interview Engine (Module 5)" below.**
 - Live end-to-end verification of a *resume-aware* plan (real Gemini-analyzed resume, not the fake test provider) surfaced a pre-existing **Module 3** issue in this environment (see "What was actually verified" below) — out of scope to fix here since it's in the Gemini provider, not the planner; the planner's own handling of a not-ready resume (`409 RESUME_NOT_READY`) was verified live and behaves correctly regardless.
+
+## Interview Engine (Module 5)
+
+### Architecture
+
+```
+POST /interview-sessions/{id}/start, /answers, /abandon; GET .../current-turn
+  → app/api/v1/interviews.py (thin — parses request, calls one InterviewExecutionService
+    method, shapes response)
+    → InterviewExecutionService (app/services/interview/execution_service.py) —
+      owns transactions/locking/idempotency, the only caller of build_interview_graph()
+        → build_execution_context(session) (Module 4 boundary) — plan_snapshot + rounds only
+        → build_interview_graph(provider, checkpointer) (app/agents/graph.py)
+          → 8 nodes (app/agents/nodes/*.py), each a thin adapter over InterviewState
+            → InterviewAgentProvider (app/services/interview_intelligence/) — Gemini
+              structured-output calls, or FakeInterviewAgentProvider in tests
+            → app/agents/policy.py — every deterministic rule (difficulty, follow-up cap,
+              round length) the nodes apply; zero LLM calls in this file
+        → persists Question/Answer/AnswerEvaluation/InterviewRound/InterviewSession,
+          one commit per turn
+```
+
+### Graph shape
+
+```
+    START --(route_entry: trigger)-->
+        "START"          -> generate_question -> END
+        "SUBMIT_ANSWER"  -> evaluate_answer -> evaluate_communication -> adapt_difficulty
+                             -> decide_next_action --(route_next_action)-->
+                                 FOLLOW_UP     -> follow_up -> END
+                                 NEXT_QUESTION -> generate_question -> END
+                                 COMPLETE      -> complete -> END
+                                 NEXT_ROUND    -> round_transition
+                                     --(route_after_round_transition)-->
+                                         "generate_question" -> generate_question -> END
+                                         "complete"          -> complete -> END
+```
+
+8 explicit nodes, no giant single node (module §2). The Knowledge Agent is deliberately not a node — see `app/agents/nodes/knowledge.py`'s docstring.
+
+### State model
+
+`InterviewState` (`app/agents/state.py`) is the graph's **transient** execution state, not the durable record — Postgres is (module §4). Every field is rebuilt fresh from `InterviewExecutionContext` + live `interview_sessions`/`interview_rounds`/`questions`/`answers` at the start of every turn; nothing is trusted blindly from a stale checkpoint. Field groups: identity (`interview_id`/`user_id`), read-only plan context (`company`/`role`/`mode`/`round_plan`, from Module 4's immutable snapshot — module §14 forbids querying the live template), current position (`current_round`/`current_round_index`/`current_question`/`current_difficulty`/`previous_difficulty`), this-turn working memory scoped to the *current round only* (`last_question`/`last_answer`/`question_history`/`answer_history` — full history lives in Postgres), in-flight evaluation (`technical_evaluation`/`communication_evaluation`/`evaluation`), follow-up bookkeeping (`follow_up_count`), display-only aggregates (`round_score`/`interview_scores`), resume grounding as primitives only (`personalization_context`/`resume_evidence_context` — never raw text), and deterministic control flow (`trigger`/`next_action`/`interview_status`/`rounds_to_skip`). No secrets, no raw resume text, no PII beyond what Module 3's evidence snippets already exposed.
+
+### Persistence vs. graph state, and what "resume later" actually means
+
+LangGraph's Postgres checkpointer (`app/agents/checkpointer.py`) is real, wired end to end, and verified live — querying `checkpoints` after a real interview shows real accumulated rows keyed by `langgraph_thread_id`. But `InterviewExecutionService` does **not** rely on it for recoverability: every turn rebuilds a complete `InterviewState` from Postgres and calls `ainvoke()` fresh, rather than resuming a specific interrupted node. The actual "candidate answers Q1, stops, comes back later, continues" guarantee (module §5, §6) comes entirely from Postgres being the source of truth (`interview_sessions.current_question_id` is a direct, indexed pointer to the pending turn) plus the idempotent-retry design below — documented honestly as a deliberate, sufficient simplification, not an oversight, in Architecture.md's Decisions Log #10.
+
+### Idempotency and concurrency
+
+`submit_answer` is two-phase:
+1. **Phase 1** — persist the candidate's `Answer` row and commit it **immediately, before any LLM call**. The submission survives even if the graph invocation that follows fails.
+2. **Phase 2** — re-acquire a `SELECT ... FOR UPDATE` row lock on `interview_sessions` (serializes concurrent submissions for the same session), then evaluate/adapt/persist everything else in one final commit.
+
+Idempotency is keyed on whether an `AnswerEvaluation` already exists for the answer: if yes, replay the persisted result (zero new LLM calls, zero new rows — verified by asserting `provider.calls.count("evaluate_technical") == 1` after a duplicate submission in tests); if an `Answer` exists with no evaluation yet (a prior attempt died mid-turn), reuse it and evaluate from the already-persisted text. **A real bug in this exact logic was caught by the test suite, not by inspection**: the initial implementation checked "is this the current question" *before* checking "does this question already have an answer," which meant a legitimate retry of the *previous* (now-superseded) turn was rejected as `409 STALE_QUESTION_ID` instead of being replayed — exactly the single most common retry shape (client resubmits after a lost response). Fixed by reordering the checks; see `test_duplicate_answer_retry_is_idempotent` and its docstring in `execution_service.py` for the full account. `answers.question_id`'s existing DB-level unique constraint is the final backstop against a genuine race.
+
+### Interview lifecycle
+
+`PLANNED (not_started)` → `POST /start` → `IN_PROGRESS` → (`POST /answers` × N, difficulty adapting each turn) → `COMPLETED` (all non-coding rounds exhausted) or `ABANDONED` (`POST /abandon`, only from `not_started`/`in_progress`). `interview_rounds.status` tracks `pending → active → completed`, with `skipped` for any `coding` round encountered (module §7/§15 — Module 6 territory, never executed or faked).
+
+### Question generation & follow-up strategy
+
+Question Generator Agent produces a fresh, round-opening question (`app/agents/nodes/question_generator.py`); Interview Agent produces a follow-up grounded in the *specific reason* the Evaluation Agent flagged (`TechnicalEvaluation.follow_up_reason`), never a generic "tell me more" (`app/agents/nodes/interview_agent.py`). Both call `InterviewAgentProvider`, never the Gemini SDK directly. Deterministic duplicate-question control: normalize + compare against the round's already-asked questions, one bounded retry, then proceed regardless (module §17 — no semantic-similarity infra for MVP). The Supervisor's `decide_next_action` (not the LLM) decides FOLLOW_UP vs. NEXT_QUESTION vs. NEXT_ROUND vs. COMPLETE, capped at `MAX_FOLLOW_UPS_PER_QUESTION = 2` regardless of how many times the LLM would keep flagging `follow_up_worthy` — verified live: a real Gemini call flagged a third follow-up as warranted, and the deterministic cap correctly overrode it and moved the interview on anyway.
+
+### Evaluation strategy
+
+Evaluation Agent (`technical_score`/`problem_solving_score`, one Gemini call) and Communication Agent (`communication_score`/`confidence_score`, one separate Gemini call) are independent — communication scoring never sees the technical evaluation or difficulty context, so a technically-wrong-but-clearly-explained answer can still score well on communication and vice versa. `confidence` is explicitly redefined and prompted as *observable directness/assertiveness of phrasing* (hedging vs. decisive language) — never a psychological, personality, or gender inference (module §9, §11's explicit prohibition; see `CommunicationEvaluation`'s docstring in `app/services/interview_intelligence/schemas.py`). Every score is paired with a specific, evidence-citing explanation — never a bare number.
+
+### Adaptive difficulty algorithm
+
+Pure deterministic Python (`app/agents/policy.py::compute_difficulty_signal`/`apply_difficulty_signal`), zero LLM involvement — module §12's explicit instruction:
+
+```
+average = (technical_score + problem_solving_score) / 2
+signal  = INCREASE if average >= 80 else DECREASE if average <= 40 else MAINTAIN
+new_difficulty = clamp(apply(current_difficulty, signal), EASY, HARD)
+```
+
+The 40–80 dead zone is the anti-oscillation mechanism — a single so-so answer never flips the difficulty. Verified live against real Gemini scores across a full session: `medium →(95/90)→ hard`, held at `hard` through further strong answers (clamped, never overflows), `hard →(10/10)→ easy` on a deliberately weak answer, `hard →(65/70)→ hard` (maintain) on a middling one.
+
+### Resume-grounding strategy
+
+Prompts receive only `InterviewExecutionContext.personalization` flattened to primitives (`skills`, `evidence_snippets`, `project_titles`) — never raw resume text — with an explicit system-prompt instruction to ask about evidenced skills/projects only and never assert a claim not present in the evidence (module §16, mirrors Module 3's own extraction-prompt discipline). Verified live: with a resume attached, the first question asked about a skill genuinely present on the candidate's resume; without one, questions use a generic `"{round_type} fundamentals"` topic instead of inventing a resume claim.
+
+### Coding-round boundary (Module 6)
+
+A `coding` round in the plan is never executed or faked. `round_transition_node` (`app/agents/nodes/round_management.py`) detects it, marks `InterviewRound.status = skipped` with a logged reason, and advances to the next round (or completes, if it was last) — verified live: a "Technical Mock" plan (introduction + technical + coding) correctly skipped its coding round and reached `session_complete` after only the non-coding rounds were answered.
+
+### LLM provider boundary
+
+`app/services/interview_intelligence/` mirrors `app/services/resume_intelligence/` file-for-file: `provider.py` (`InterviewAgentProvider` Protocol — `generate_question`/`generate_follow_up`/`evaluate_technical`/`evaluate_communication`, typed error hierarchy), `schemas.py` (structured-output contracts, written from day one with the "no non-None `Field(default=...)`" rule the earlier Resume Intelligence bug taught — verified the same way, schema-walk + real `google.genai._transformers.t_schema()` check, before first live use), `gemini_provider.py` (real: `response_schema=`, `temperature=0.2`, `asyncio.wait_for` timeout, exactly one retry for `ServerError` only), `fake_provider.py` (deterministic, test-only, mirrors `FakeResumeIntelligenceProvider`'s singleton/`.reset()`/forced-outcome shape), `factories.py` (`INTERVIEW_ENGINE_PROVIDER: Literal["gemini","fake"]`, same production guard as `RESUME_INTELLIGENCE_PROVIDER`). No node calls the Gemini SDK directly.
+
+### Cost-control strategy
+
+Documented, graph-shape-enforced budget per turn (module §23): Evaluation Agent (1 call) + Communication Agent (1 call) + at most one generation call (Question Generator **or** Interview Agent, never both, zero if the interview just completed) = **2–3 Gemini calls per answer, 1 call for `/start`**. Knowledge Agent, Difficulty Agent, and Supervisor routing are pure Python — 0 calls. Follow-ups are hard-capped, so nothing loops indefinitely regardless of LLM output. Verified live: the container logs from one full multi-turn session show exactly this call pattern, turn after turn.
+
+### LLM failure handling
+
+`InterviewIntelligenceTimeoutError`/`InterviewIntelligenceProviderError` are translated to a clean `503` (`INTERVIEW_ENGINE_TIMEOUT`/`INTERVIEW_ENGINE_UNAVAILABLE`) by `InterviewExecutionService._invoke_graph` — never a raw exception, never a corrupted interview state, never a fabricated evaluation. Because the candidate's `Answer` is committed in Phase 1 before the graph ever runs, a failure here never loses the submission. **Verified live, not just in tests**: a real Gemini `ClientError` (rate-limited after many rapid sequential live calls during this session's verification) correctly produced a `503`; the answer was confirmed still persisted via direct DB query; a retry correctly reused the preserved answer text (ignoring the different text sent in the retry payload) rather than creating a duplicate.
+
+### Known limitations
+
+- Knowledge Agent is deterministic for MVP (resume evidence + `role_profiles.json` topic hints), not a ChromaDB RAG lookup — no real knowledge base exists to query yet, and `resume_embeddings` indexing is currently broken against the real Gemini embedding API regardless (a separate, pre-existing issue — see Module 3's "Known limitations" above). The seam (`app/agents/nodes/knowledge.py::retrieve()`) is ready for a real implementation later.
+- The Redis hot-state cache described in Architecture.md §5.5/Database.md §9 was not implemented — `/current-turn` reads Postgres directly, fast enough at MVP scale.
+- `question_bank`/`knowledge_base` ChromaDB collections were not implemented — every question is LLM-generated live (`source=generated`), never sourced from a pre-authored bank.
+- LangGraph's Postgres checkpointer is real and verified working but is not currently the thing making "resume later" work (Postgres + idempotent retry is) — see "Persistence vs. graph state" above. A future upgrade to node-level resume granularity would build on the existing, already-wired infrastructure.
+- Concurrent-submission safety (the `SELECT ... FOR UPDATE` row lock + DB unique-constraint backstop) is reviewed by design and exercised by the idempotency tests, but not stress-tested under genuine parallel load in this session.
+- `system_design` and `resume_discussion` rounds use the same generic Evaluation/Communication Agents as `technical`/`behavioral` — no round-type-specific rubric yet (matches Roadmap.md's Module 5 scope, which doesn't call for one).
+- The `langgraph`/`langgraph-checkpoint-postgres` pinned version pair emits a `DeprecationWarning: incompatible versions... upgrade langgraph to avoid unexpected behavior` — everything tested works correctly today; flagged for whoever next revisits the pinned versions in `pyproject.toml`.
 
 ## Manually verifying authentication with Swagger
 
@@ -539,6 +661,20 @@ Without `GEMINI_API_KEY` configured, step 3 settles on `parsed_status: "failed"`
 9. **Resume-aware plan**: upload + gap-analyze a resume per the Resume Intelligence walkthrough above (`POST /resumes`, poll until `done`, `POST /resumes/{id}/gap-analysis` with `{"role_key": "backend_engineer"}`), then find a role/template pairing that includes a `resume_discussion` round (e.g. role `role_key=software_engineer`, template "Full Mock Interview") or just pass the resume id explicitly to any template. `POST /interview-sessions` with `"resume_id": "<resume id>"` and `"difficulty": "auto"` → Execute. `GET .../plan` afterward should show a non-null `personalization` block and a `difficulty.reasons` entry mentioning "gap-analysis".
 10. **Ownership check**: register a second account, Authorize with *its* token, then `GET /api/v1/interview-sessions/{id}` and `GET /api/v1/interview-sessions/{id}/plan` using the first account's interview ID → expect `404` on both.
 11. **Validation check**: repeat step 6 with a `template_id` that belongs to a different role, or a `mode` that doesn't match the template's own mode → expect `422` with `code: "TEMPLATE_ROLE_MISMATCH"` / `"INCOMPATIBLE_MODE"`.
+
+## Manually verifying the Interview Engine with Swagger
+
+1. Create a plan per the walkthrough above — pick **"Behavioral Prep"** (introduction + behavioral, no coding round, no resume required) for the shortest complete run. Copy the returned interview `id`.
+2. **Start it**: `POST /api/v1/interview-sessions/{id}/start` → Execute. Expect `200` with `status: "in_progress"`, `current_round: "introduction"`, and a `question` object. Copy `question.id`.
+3. **Check current turn** (should match, no side effects): `GET /api/v1/interview-sessions/{id}/current-turn` → Execute. Expect the same `question.id`.
+4. **Answer it**: `POST /api/v1/interview-sessions/{id}/answers` → body `{"question_id": "<question id>", "answer_text": "<a real, substantive answer>"}` → Execute. Expect `200` with a full `evaluation` block (technical/problem_solving/communication/confidence, each `{score, explanation}`, plus `difficulty_signal`), `previous_difficulty`/`current_difficulty`, and `next.type: "question"` with a new `question`. If `next.question.parent_question_id` is non-null, it's a follow-up to the question you just answered — answer it the same way.
+5. **Watch difficulty adapt**: give a short, thin answer next (e.g. `"not sure"`) and expect `current_difficulty` to move toward `easy` and `difficulty_signal: "decrease"`; give a detailed, technically strong answer and expect the opposite.
+6. **Keep answering** until `next.type` becomes `"session_complete"` — `GET /api/v1/interview-sessions/{id}` should now show `status: "completed"` with `completed_at` set.
+7. **Idempotency check**: re-`POST` the exact same `{question_id, answer_text}` you already submitted for any earlier question in this run → expect `200` with the *identical* `evaluation` as the first time (no new Gemini call, no duplicate turn), not an error.
+8. **Ownership check**: register a second account, Authorize with *its* token, then `GET .../current-turn` and `POST .../answers` using the first account's interview `id` → expect `404` on both.
+9. **Abandon** (on a fresh, not-yet-completed interview): `POST /api/v1/interview-sessions/{id}/abandon` → Execute. Expect `200` with `status: "abandoned"`. Repeating it → expect `409 INVALID_STATE_TRANSITION`.
+
+Without `GEMINI_API_KEY` configured (or `INTERVIEW_ENGINE_PROVIDER=fake`), steps 2/4 return `503 INTERVIEW_ENGINE_UNAVAILABLE` instead — `/current-turn` and `/abandon` are unaffected since they never call the provider.
 
 ## What was actually verified, not just written (Module 2)
 
@@ -607,10 +743,32 @@ Follow-up session, addressing the blocker the Module 4 verification above found.
 - Grepped the full `docker compose logs backend` output from this session for passwords, bearer tokens, the configured API key, and the synthetic resume's own PII (candidate name, employer name) — no matches on any.
 - Found (not fixed, explicitly out of scope): a separate, pre-existing Gemini **embedding** 404 (`text-embedding-004` not found for `embedContent` on API version `v1beta`) — logged during the same live run, unrelated to the structured-output bug, doesn't block anything already verified above. See "Known limitations" in the Resume Intelligence section.
 
+## What was actually verified, not just written (Module 5)
+
+- `uv sync` — no new dependencies beyond what was already pinned (`langgraph`, `langgraph-checkpoint-postgres`, `psycopg` were already in `pyproject.toml`, just unused until now).
+- Directly compiled the real `StateGraph` (`build_interview_graph`) with an in-memory checkpointer and ran two- and multi-turn simulations against `FakeInterviewAgentProvider` *before* wiring any persistence — confirmed the graph's routing (difficulty adaptation, round transition, coding-round skip, completion) was correct in isolation, which made the subsequent persistence-layer bugs (below) much faster to isolate.
+- New migration (`interview execution`) autogenerated, hand-adjusted (autogenerate left both new FK constraints unnamed, which would have broken `downgrade()` — named them explicitly), round-tripped `upgrade → downgrade -1 → upgrade head` and `alembic check` (no drift) on **both** `interviewiq` and `interviewiq_test`.
+- `ruff check .` and `black --check .` — clean across every new/changed file.
+- `pytest tests/test_interview_execution.py` — **first run: 24 errors**, all `psycopg.InterfaceError: Psycopg cannot use the 'ProactorEventLoop' to run in async mode` — a real, environment-specific bug: `psycopg`'s async mode is incompatible with Python's default Windows event loop, and `app/agents/checkpointer.py` (dormant scaffold code since Module 1) had never actually been exercised before this module's first real `get_checkpointer()` call. Linux/the Docker deployment target was never affected. Fixed with `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`, guarded by `sys.platform`, in `checkpointer.py`.
+- Re-running surfaced **one more real bug**, caught by the test suite itself: `test_duplicate_answer_retry_is_idempotent` failed with `409 STALE_QUESTION_ID` instead of a successful replay — the initial `submit_answer` checked "is this the current question" before checking "does this question already have a recorded answer," so a legitimate retry of the turn that had *just* advanced the interview to a new question was rejected instead of replayed, defeating the idempotency design for its single most common real-world case. Fixed by reordering the checks (idempotency first); see `execution_service.py::submit_answer`'s docstring for the full account. Two follow-on test corrections (my own test bugs, not code bugs): a "stale" test using a random UUID was actually exercising 404 `QUESTION_NOT_FOUND`, not 409 `STALE_QUESTION_ID` — split into two correctly-targeted tests, one of which (`test_question_id_from_another_interview_rejected_as_stale`) uses a second interview's real question id to reach the genuine stale path.
+- Full suite (`pytest`, all files) — **143 passed, 0 failed** (117 prior + 26 new Module 5 tests), verified stable across 2 consecutive full runs — confirms no regression to auth/resume/planning alongside full Module 5 coverage.
+- `docker compose up -d --build backend` — rebuilt cleanly; `app.checkpointer_ready` logged on startup (confirms `AsyncPostgresSaver.setup()` succeeds against the real container, Linux, no event-loop issue there); `GET /api/v1/health` → `{"status":"ok",...}`.
+- Queried LangGraph's own `checkpoints` table directly after a real session — real accumulated rows keyed by `langgraph_thread_id`, confirming the checkpointer is genuinely wired end to end (Roadmap.md's Module 5 exit criterion), not just present in code.
+- **Found and fixed a third real bug, on the final re-verification pass, not the first**: once the checkpoint tables actually existed (created by the live Docker run above), `alembic check` started failing — it saw `checkpoints`/`checkpoint_blobs`/`checkpoint_writes`/`checkpoint_migrations` as "extra tables not in our `Base.metadata`" and proposed `DROP TABLE` migrations for infrastructure we don't own. Fixed with an `include_object` filter in `alembic/env.py` excluding those four table names from autogenerate/check comparison. Re-verified clean (`alembic check` passes, migration round-trips cleanly) on both `interviewiq` and `interviewiq_test` afterward.
+- **Live smoke test, real Gemini API, a full multi-turn session against the running Docker container** — not mocked, not simulated:
+  - Planned a "Behavioral Prep" interview → `POST /start` → a genuinely well-formed, role-appropriate interviewer question came back from live Gemini.
+  - Answered with a detailed technical description → live Gemini evaluation scored it 90-95 across all four dimensions with specific, evidence-citing explanations → `difficulty_signal: "increase"`, `medium → hard` — and the Interview Agent generated a **live follow-up question that specifically quoted back the candidate's own claims** ("You mentioned using a per-client sequence number...") — exactly the differentiator the module exists to prove out.
+  - Continued through a second live follow-up, confirmed difficulty correctly clamped at `hard` (no overflow) then correctly reset to `medium` on a genuinely weak answer, watched the follow-up cap (`MAX_FOLLOW_UPS_PER_QUESTION=2`) correctly force the engine to move on even though the live Gemini evaluation still judged the answer follow-up-worthy — the deterministic cap overriding real LLM judgment, verified, not assumed.
+  - Progressed into the `behavioral` round (confirmed round transition), through more live follow-ups (the round genuinely needed them — Gemini flagged real gaps in two separate answers), reaching 8 real Gemini-backed turns total before hitting a **real, live `ClientError`** (almost certainly a free-tier rate limit after ~15 rapid sequential live calls in a few minutes) on the 9th evaluation call.
+  - **This failure was itself valuable live verification, not just an interruption**: confirmed via `503 INTERVIEW_ENGINE_UNAVAILABLE`, then via direct DB query that the candidate's answer was durably preserved (`has_evaluation=0`, exact text intact) despite the failure; retried and confirmed the retry reused the *original* preserved 510-character answer text (not the different placeholder text sent in the retry payload) rather than duplicating or losing it; `GET .../current-turn` and `GET .../{id}` confirmed the interview remained fully valid and resumable (`status: "in_progress"`, correct round/difficulty/pending question) throughout — exactly the "stop and resume" resilience the design targets. Did not force the session through to `session_complete` against live Gemini after this (would mean burning more quota chasing a cosmetic finish-line); full completion (`session_complete`, `status: "completed"`) **is** verified — via the deterministic automated test suite (`test_rounds_transition_in_order_and_reach_completed`, `test_coding_round_is_skipped_not_faked`), which reaches it repeatably without depending on external quota.
+- Grepped the full `docker compose logs backend` output from the live session for passwords, bearer tokens, the API key, and every candidate answer's own text — no matches; only structured event names + lengths/ids ever appear, exactly as designed (module §20's "no chain-of-thought exposure" extends to logs).
+
 ## Explicitly not in this milestone
 
 **Module 2 (Authentication):** no `POST /auth/verify-email` or `PATCH /users/me` (not in the required endpoint list); no production email provider; Google OAuth needs real credentials to exercise end-to-end; no recruiter/admin endpoints yet (RBAC dependency exists and is tested, nothing depends on it yet — see Features.md, marked "Later").
 
 **Module 3 (Resume Intelligence):** at the time this module shipped, no frontend, no Interview Planner, no LangGraph agents, no interview functionality — it stopped at the clean integration boundary (`app/services/resume/interview_context.py`) that Module 4 now calls. No OCR for scanned PDFs (module §3, explicitly deferred). `resume_embeddings` is indexed but not queried by anything yet (module §14). A real-Gemini-key resume upload was found broken (`google-genai` response-schema compatibility error) during Module 4's live verification and **has since been fixed** — see "Gemini structured-output schema fix" above. The Gemini **embedding** path is still broken (separate issue, 404 on `text-embedding-004`) — see "Known limitations" above.
 
-**Module 4 (Interview Planner):** no frontend. No `/interview-sessions/{id}/start`/`/current-turn`/`/answers`/`/abandon` — these require the LangGraph Supervisor, which is Module 5's scope (Roadmap.md); a planned interview can be created/listed/retrieved but never actually run through this module alone. No admin UI for companies/roles/templates (seed-file + CLI only, per Roadmap.md's stated scope). `resume_gap_analysis.target_role_id` remains unresolved (Module 3's gap-analysis endpoint still only accepts `role_key`). `roles`/`template_rounds` lack `created_at` (pre-existing Module 1 gap, not introduced or fixed here). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+**Module 4 (Interview Planner):** no frontend. `/interview-sessions/{id}/start`/`/current-turn`/`/answers`/`/abandon` were out of scope at the time — **since implemented, see "Interview Engine (Module 5)" above.** No admin UI for companies/roles/templates (seed-file + CLI only, per Roadmap.md's stated scope). `resume_gap_analysis.target_role_id` remains unresolved (Module 3's gap-analysis endpoint still only accepts `role_key`). `roles`/`template_rounds` lack `created_at` (pre-existing Module 1 gap, not introduced or fixed here).
+
+**Module 5 (Interview Engine):** no frontend. No coding rounds/execution — `RoundType.CODING` is cleanly skipped, never faked (Module 6, Roadmap.md). No Learning Agent, no Report Agent, no `interview_reports`/`learning_roadmaps` (Module 7) — `POST /answers`' `next.type: "session_complete"` deliberately omits a `report_id`, since nothing generates one yet. No real Knowledge Agent/RAG (deterministic grounding only — see "Known limitations" above). No Redis hot-state cache, no question-bank/knowledge-base ChromaDB collections. LangGraph's checkpointer is real and wired but not yet the thing providing turn-resume recovery (Postgres + idempotent retry is — see "Persistence vs. graph state" above); a future upgrade could exploit it for node-level resume granularity. No stress-tested concurrent-load verification (reviewed by design, exercised by idempotency tests, not load-tested). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.

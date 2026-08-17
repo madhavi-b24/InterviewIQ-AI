@@ -291,7 +291,7 @@ Unique: `(template_id, sequence_no)`. Index: `(template_id, round_type)` — sup
 
 ### `interview_sessions`
 
-The aggregate root for a single interview attempt. **Planning fields (everything through `plan_snapshot`) are implemented in Module 4; execution fields (`current_round_sequence`, `started_at`, `completed_at`, and every status beyond `not_started`) are only ever written by Module 5**, which doesn't exist yet — Module 4 only ever creates `not_started` sessions.
+The aggregate root for a single interview attempt. **Planning fields (everything through `plan_snapshot`) are implemented in Module 4; execution fields (`current_round_sequence`, `current_question_id`, `started_at`, `completed_at`, and every status beyond `not_started`) are implemented in Module 5.**
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -308,9 +308,10 @@ The aggregate root for a single interview attempt. **Planning fields (everything
 | starting_difficulty | enum(`easy`,`medium`,`hard`) | not null — *(Module 4)* the resolved starting difficulty at plan time: `requested_difficulty` as-is if explicit, or the deterministic AUTO resolution if `requested_difficulty=auto`. Immutable after creation — distinct from `current_difficulty`, which Module 5 will mutate. |
 | mode | enum(`full_mock`,`technical_only`,`coding_only`,`behavioral_only`,`resume_deep_dive`) | not null, default `full_mock` — *(Module 4)* inherited from (and, if the plan request specified one, validated against) `interview_templates.mode` at plan time |
 | plan_snapshot | jsonb | not null, default `{}` — *(Module 4)* the immutable plan snapshot (see the design note below) |
-| langgraph_thread_id | text | unique, not null — links to LangGraph checkpoint. Module 4 assigns a `planned:<uuid>` placeholder at plan time (satisfies the NOT NULL/unique constraint for a session that has been planned but not started); Module 5 assigns the real checkpoint thread id when the interview actually starts. |
-| started_at | timestamptz | nullable |
-| completed_at | timestamptz | nullable |
+| langgraph_thread_id | text | unique, not null — links to LangGraph checkpoint. Module 4 assigns a `planned:<uuid>` placeholder at plan time (satisfies the NOT NULL/unique constraint for a session that has been planned but not started); *(Module 5)* `InterviewExecutionService.start_interview()` assigns the real `interview:<session_id>:<uuid>` thread id when the interview actually starts — this is the key LangGraph's own checkpoint tables (see §5.x below) are keyed by. |
+| started_at | timestamptz | nullable — *(Module 5)* set when `/start` succeeds |
+| completed_at | timestamptz | nullable — *(Module 5)* set when the interview reaches `completed` or `abandoned` |
+| current_question_id | uuid | FK → questions.id, `ON DELETE SET NULL`, nullable — *(Module 5)* explicit pointer to the pending turn's question. `None` before `/start` and again once the interview is `completed`/`abandoned`. Exists so `/current-turn` and resuming after an interruption are a single indexed read rather than a derived "question with no answer yet" query — this is Postgres, not the LangGraph checkpoint, providing the "come back later without losing the interview" guarantee (module §5, §6). |
 | created_at | timestamptz | not null |
 
 Index: `(user_id, status)` for dashboard "in-progress interviews" queries.
@@ -321,7 +322,7 @@ Index: `(user_id, status)` for dashboard "in-progress interviews" queries.
 
 ### `interview_rounds`
 
-One row per round *instance* within a session. `weight` and `planned_difficulty` are **snapshotted** from `template_rounds` at session-creation time — if the template is edited later, past sessions' reports must not silently change.
+One row per round *instance* within a session. `weight` and `planned_difficulty` are **snapshotted** from `template_rounds` at session-creation time — if the template is edited later, past sessions' reports must not silently change. *(Module 5)* `status` transitions `pending → active → completed` as the engine progresses; a `coding` round is transitioned straight to `skipped` (never executed/faked — Module 6 territory, module §7/§15) rather than left `pending` forever.
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -340,6 +341,8 @@ Unique: `(session_id, sequence_no)`.
 
 ### `questions`
 
+**Status: implemented in Module 5** (`reference_answer`/`vector_ref`/`source=bank` remain unused — no question bank or Knowledge Agent RAG retrieval yet, see backend/README.md's Module 5 "Known limitations"; every Module 5 question has `source=generated`).
+
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
@@ -347,13 +350,14 @@ Unique: `(session_id, sequence_no)`.
 | topic | text | not null |
 | difficulty | enum(`easy`,`medium`,`hard`) | not null |
 | question_text | text | not null |
-| question_type | enum(`mcq`,`open`,`coding`,`system_design`) | not null |
+| question_type | enum(`mcq`,`open`,`coding`,`system_design`) | not null — Module 5 only ever writes `open` or `system_design` (never `mcq`/`coding`) |
 | reference_answer | text | nullable — from Knowledge Agent retrieval, used only for evaluation grounding |
 | source | enum(`bank`,`generated`) | not null |
 | vector_ref | text | nullable — ChromaDB doc id if sourced from `question_bank` |
 | asked_at | timestamptz | not null |
+| parent_question_id | uuid | FK → questions.id, `ON DELETE SET NULL`, nullable — *(Module 5)* self-referential; set when this question is a follow-up (Interview Agent, module §8) to the question named here. `null` for a fresh, round-opening question (Question Generator Agent). Chains can be more than one level deep (a follow-up can itself be followed up, capped by `MAX_FOLLOW_UPS_PER_QUESTION`, `app/agents/policy.py`) — root-question identity for round-length/duplicate-tracking purposes is found by walking this chain, not stored redundantly. |
 
-Index: `(round_id)`.
+Index: `(round_id)`. Creates a circular FK reference across `interview_sessions.current_question_id` → `questions` → `interview_rounds` → `interview_sessions` — intentional and safe (both new FKs are nullable with `ON DELETE SET NULL`; see `4df563d9a10b_interview_execution.py`'s docstring).
 
 ### `question_test_cases`
 
@@ -373,7 +377,7 @@ Unique: `(question_id, sequence_no)`.
 
 ### `answers`
 
-One per question — for coding questions this holds the candidate's verbal/text approach explanation (if any); the code itself lives in `code_submissions`.
+**Status: implemented in Module 5** (text rounds only — `code_submissions` below remains Module 6). One per question — for coding questions this holds the candidate's verbal/text approach explanation (if any); the code itself lives in `code_submissions`.
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -433,7 +437,7 @@ Unique: `(code_submission_id, test_case_id)`.
 
 ### `answer_evaluations`
 
-Produced by the Evaluation Agent (technical, problem_solving) and Communication Agent (communication, confidence) for **every** answer, coding included — a coding question's verbal approach explanation is evaluated here independently of its code.
+**Status: implemented in Module 5** (text rounds only — `coding_evaluations` below remains Module 6). Produced by the Evaluation Agent (technical, problem_solving) and Communication Agent (communication, confidence) for **every** answer, coding included — a coding question's verbal approach explanation is evaluated here independently of its code. `difficulty_signal` is a pure function of `technical_score`/`problem_solving_score` (`app/agents/policy.py::compute_difficulty_signal` — `>=80` increase, `<=40` decrease, else maintain; never LLM-decided, module §12) — stored here for audit even though the *effect* of the signal (the new `interview_sessions.current_difficulty`) is what the next question actually reads.
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -592,15 +596,21 @@ Unique: `(user_id, snapshot_date)`.
 | `ratelimit:{user_id}:{route}` | Basic per-user rate limiting | rolling window |
 | `email_verify:{token}` | Email verification token | 24h |
 
-Redis is never authoritative — it can be flushed and the system recovers from Postgres.
+Redis is never authoritative — it can be flushed and the system recovers from Postgres. **Deviation (Module 5):** `session:{id}:hot_state` was not implemented — `GET /interview-sessions/{id}/current-turn` reads `interview_sessions.current_question_id` directly (one indexed FK lookup), which is fast enough at MVP scale without a caching layer. Left as a documented future optimization, not a design gap; nothing in Module 5 assumes it exists.
 
 ### ChromaDB (vector store)
 
 | Collection | Contents | Written by | Read by |
 |---|---|---|---|
-| `question_bank` | Pre-authored questions tagged by company/role/topic/difficulty | seed script | Question Generator Agent |
-| `knowledge_base` | Curated reference material / model answers per topic | seed script | Knowledge Agent |
-| `resume_embeddings` | Embedded skill/project/experience/certification evidence chunks, one vector per chunk, metadata `{user_id, resume_id, kind, name}` | resume upload pipeline (best-effort, module 3 §14) | not read by anything yet — indexing-only boundary prepared for the future Interview Engine's Knowledge Agent |
+| `question_bank` | Pre-authored questions tagged by company/role/topic/difficulty | seed script | not implemented — Module 5's Question Generator Agent generates every question live instead (`questions.source` is always `generated`, never `bank`) |
+| `knowledge_base` | Curated reference material / model answers per topic | seed script | not implemented — Module 5's Knowledge Agent is a deterministic in-process helper (resume evidence + `role_profiles.json` topic hints), not a RAG lookup; see backend/README.md's Module 5 "Known limitations" |
+| `resume_embeddings` | Embedded skill/project/experience/certification evidence chunks, one vector per chunk, metadata `{user_id, resume_id, kind, name}` | resume upload pipeline (best-effort, module 3 §14) | not read by anything yet — indexing-only boundary prepared for a future Knowledge Agent upgrade. (Separately, this write path is currently broken against the real Gemini embedding API — a known, unrelated TODO, see backend/README.md.) |
+
+### LangGraph checkpoint tables (Module 5, Postgres-backed but not Alembic-managed)
+
+`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations` — created and versioned by `langgraph-checkpoint-postgres` itself (`AsyncPostgresSaver.setup()`, called idempotently from `app/main.py`'s lifespan on every startup), **not** by an Alembic migration; they live in the same Postgres database but are a separate, library-owned schema, per Architecture.md §5.5's original design. Keyed by `thread_id` = `interview_sessions.langgraph_thread_id`. Verified live: querying `checkpoints` after a real multi-turn interview shows one row group per `thread_id` accumulating across turns (confirms LangGraph's Postgres-backed persistence genuinely executes, satisfying Roadmap.md's Module 5 exit criterion "Postgres-backed checkpointing wired end to end").
+
+**Important nuance, documented honestly rather than overclaimed**: `InterviewExecutionService` rebuilds a *complete* `InterviewState` from Postgres on every turn and passes it whole to `graph.ainvoke()`, rather than reading back a partial checkpoint and resuming a specific interrupted node. This means the checkpoint tables are real and populated, but the actual "candidate can stop mid-question and resume later without losing the interview" guarantee (module §5, §6) comes entirely from Postgres (`interview_sessions`/`interview_rounds`/`questions`/`answers`/`answer_evaluations`) plus the idempotent-retry design in `InterviewExecutionService.submit_answer` — not from resuming a specific crashed LangGraph node. The checkpointer is real infrastructure, correctly wired, and available for a future upgrade to node-level resume granularity; it isn't yet the thing making recovery work today.
 
 ---
 

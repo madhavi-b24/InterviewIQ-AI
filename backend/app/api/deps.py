@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_client import get_redis
 from app.core.config import Settings, get_settings
-from app.core.exceptions import ForbiddenError, UnauthorizedError
+from app.core.exceptions import ForbiddenError, ServiceUnavailableError, UnauthorizedError
 from app.core.security import InvalidTokenError, TokenType, decode_token
 from app.db.session import get_db_session
 from app.execution.base import CodeExecutor
@@ -26,6 +26,12 @@ from app.models.enums import UserRole
 from app.models.user import User
 from app.services.auth_service import AuthService
 from app.services.email import ConsoleEmailProvider, EmailProvider
+from app.services.interview.execution_service import InterviewExecutionService
+from app.services.interview_intelligence.factories import build_interview_agent_provider
+from app.services.interview_intelligence.provider import (
+    InterviewAgentProvider,
+    InterviewIntelligenceProviderError,
+)
 from app.services.oauth import GoogleOAuthProvider
 from app.services.planning.catalog_service import CatalogService
 from app.services.planning.interview_planner import InterviewPlannerService
@@ -170,6 +176,34 @@ def get_interview_planner_service(session: DbSession) -> InterviewPlannerService
 InterviewPlannerServiceDep = Annotated[
     InterviewPlannerService, Depends(get_interview_planner_service)
 ]
+
+
+def get_interview_execution_service(session: DbSession) -> InterviewExecutionService:
+    return InterviewExecutionService(session)
+
+
+InterviewExecutionServiceDep = Annotated[
+    InterviewExecutionService, Depends(get_interview_execution_service)
+]
+
+
+def get_interview_agent_provider(settings: AppSettings) -> InterviewAgentProvider:
+    # Eager construction is deliberate here (unlike ResumeServiceDep's lazy
+    # embedding-index factory) — only wired into the /start and /answers
+    # routes, which genuinely cannot proceed without this provider (never
+    # best-effort, unlike embeddings). InterviewIntelligenceProviderError
+    # isn't an AppError, so it's translated here rather than leaking as an
+    # unhandled 500 — the same class of bug Module 3's embedding-index
+    # dependency hit before being fixed (see backend/README.md).
+    try:
+        return build_interview_agent_provider(settings)
+    except InterviewIntelligenceProviderError as exc:
+        raise ServiceUnavailableError(
+            "the interview engine is not available right now", code="INTERVIEW_ENGINE_UNAVAILABLE"
+        ) from exc
+
+
+InterviewAgentProviderDep = Annotated[InterviewAgentProvider, Depends(get_interview_agent_provider)]
 
 
 async def db_healthcheck(session: DbSession) -> bool:

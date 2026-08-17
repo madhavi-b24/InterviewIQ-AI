@@ -108,6 +108,15 @@ class InterviewSession(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     langgraph_thread_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Module 5 — explicit pointer to the pending turn's question. Nullable:
+    # None before /start, and again once status is completed/abandoned.
+    # Lets GET /current-turn and resume-after-interruption be a single
+    # indexed read instead of a derived "question with no answer yet"
+    # query — the recoverability Postgres, not the graph state, provides
+    # (see app/agents/state.py's module docstring).
+    current_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("questions.id", ondelete="SET NULL"), nullable=True
+    )
 
     rounds: Mapped[list["InterviewRound"]] = relationship(
         back_populates="session",
@@ -174,6 +183,12 @@ class Question(Base, UUIDPrimaryKeyMixin):
     )
     vector_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     asked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Module 5 — self-referential: set when this question is a follow-up to
+    # another question in the same round (module §8: "persist follow-up
+    # relationships"). None for a fresh, round-opening question.
+    parent_question_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("questions.id", ondelete="SET NULL"), nullable=True
+    )
 
     round: Mapped["InterviewRound"] = relationship(back_populates="questions")
     test_cases: Mapped[list["QuestionTestCase"]] = relationship(

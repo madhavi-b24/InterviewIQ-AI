@@ -125,6 +125,8 @@ flowchart TD
 
 ## 5. Multi-Agent Interview Engine (LangGraph)
 
+**Status (Module 5): §5.1–5.3 and §5.5 implemented for text rounds** (introduction, technical, behavioral, resume_discussion, system_design). **§5.4 (coding round) remains Module 6** — a `coding` round in a plan is cleanly skipped, never executed/faked (module §7/§15 of the Module 5 task; `interview_rounds.status=skipped`). Learning Agent and Report Agent (roster below) are Module 7, not built. See `app/agents/` (graph + nodes), `app/services/interview_intelligence/` (the Gemini-backed provider seam), and `app/services/interview/execution_service.py` (orchestration/persistence) for the actual implementation, and backend/README.md's "Interview Engine (Module 5)" section for the full design writeup including the deviations from this section's original sketch, called out inline below.
+
 ### 5.1 Agent Roster
 
 | Agent | Responsibility | Produces |
@@ -141,6 +143,8 @@ flowchart TD
 
 Every score produced anywhere in this pipeline is stored with its explanation text alongside it — never a bare number. This is enforced at the schema level in [Database.md](Database.md) §6–7.
 
+**Implementation note (Module 5):** the Knowledge Agent is not a ChromaDB RAG lookup for MVP — it's a deterministic in-process helper (resume evidence already surfaced by Module 3 + `role_profiles.json` topic hints), not a graph node at all (see `app/agents/nodes/knowledge.py`'s docstring for why: no LLM call, no I/O, cheap enough to be a plain function other nodes call inline). This is a real, documented seam a future RAG implementation can satisfy without touching callers — not a placeholder pretending to be the real thing.
+
 ### 5.2 Shared Graph State
 
 ```
@@ -154,6 +158,8 @@ InterviewState {
   round_plan: [ ordered round types, from template_rounds ]
 }
 ```
+
+**As actually implemented** (`app/agents/state.py::InterviewState`) — the same shape, refined: `conversation_history`/`running_scores` became `question_history`/`answer_history` (scoped to the *current round only* — durable full history lives in Postgres, module §3's "do not put enormous duplicated documents into graph state") and `interview_scores` (a running average, display-only, not the report's source of truth); explicit `previous_difficulty` alongside `current_difficulty` so a response can show the transition without a second read; `follow_up_count` and `rounds_to_skip` for the two Module-5-specific mechanics (§8, §7); a `trigger` (`START`/`SUBMIT_ANSWER`) driving deterministic routing instead of relying on LangGraph's `interrupt()`/`Command(resume=...)` (see the Decisions Log entry below for why). Every field carries a one-line "why this exists" comment in the source.
 
 ### 5.3 Turn-by-Turn Flow — Text Rounds (technical / behavioral / system design)
 
@@ -181,7 +187,7 @@ sequenceDiagram
     Sup-->>C: question (HTTP response) + checkpoint saved
 ```
 
-This turn is fully synchronous within one request — LLM calls only, no execution latency.
+This turn is fully synchronous within one request — LLM calls only, no execution latency. **As implemented**, the LLM-call shape differs slightly for cost control (module §23's explicit call-budget instruction, verified live against real Gemini — see backend/README.md): Evaluation Agent and Communication Agent are each exactly one call (technical+problem_solving together; communication+confidence together), Difficulty Agent and the Supervisor's routing are pure Python (zero calls), and exactly one generation call fires per turn — Question Generator **or** Interview Agent (follow-up) **or** neither, if the interview just completed — never both. Budget: 2–3 Gemini calls per answer, 1 call for `/start`.
 
 ### 5.4 Turn-by-Turn Flow — Coding Round (asynchronous, Run vs. Submit)
 
@@ -223,6 +229,8 @@ sequenceDiagram
 - LangGraph checkpointer backed by **Postgres** — source of truth for `langgraph_thread_id`.
 - **Redis** holds a hot read-through cache of the current turn's state for low-latency polling — never the source of truth.
 - **ChromaDB** holds `question_bank`, `knowledge_base`, `resume_embeddings`.
+
+**As implemented (Module 5):** the LangGraph Postgres checkpointer is real and verified working (`app/agents/checkpointer.py` — confirmed live by querying `checkpoints` after a real multi-turn interview; see Database.md §9). But `InterviewExecutionService` treats **Postgres tables, not the checkpoint, as the sole recoverability guarantee** — it rebuilds a complete `InterviewState` from `interview_sessions`/`interview_rounds`/`questions`/`answers`/`answer_evaluations` at the start of every turn rather than resuming a checkpointed mid-turn state, so "stop and resume later" (module §5/§6) works via the idempotent-retry design in `submit_answer` (an `Answer` row is durably committed *before* any LLM call), not via LangGraph's own resume mechanics. The Redis hot-state cache (`session:{id}:hot_state`) was not implemented — `GET .../current-turn` reads Postgres directly, fast enough at MVP scale. `question_bank`/`knowledge_base` were not implemented — see §5.1's Knowledge Agent note above.
 
 ---
 
@@ -322,6 +330,11 @@ The execution sandbox and (later) Celery worker are intentionally left off this 
 | 6 | Code submissions are **multi-attempt** (`attempt_no`/`is_final`); only the final attempt is graded | Candidates need to test against sample cases before committing; gating LLM evaluation behind `is_final` bounds cost and keeps iterative "Run" fast |
 | 7 | Interview plan snapshot: **`interview_rounds` stays normalized** (as decision #5 already established for `template_rounds`); a companion `interview_sessions.plan_snapshot` **JSONB** column carries only the denormalized company/role/template labels, difficulty-resolution reasons, and resume-derived personalization — never round order/weights (Module 4) | Round data needs per-round-type queries; label/personalization data is only ever read back whole, so normalizing it would just add snapshot tables with no query benefit. Keeps the "editing a template must never retroactively change a past plan" guarantee (decision reused from `interview_rounds`) without duplicating the whole domain into JSON |
 | 8 | `app/services/interview/execution_context.py::build_execution_context()` is the sole Module 4 → Module 5 boundary, reading only `plan_snapshot` + `interview_rounds` (Module 4) | Mirrors Module 3's `app/services/resume/interview_context.py` seam. A LangGraph agent that only ever calls this one function is structurally unable to reach `companies`/`roles`/`interview_templates`/`resumes` directly — the "don't let agents query many unrelated repositories" principle enforced by construction, not convention |
+| 9 | Interview graph: **one `ainvoke()` per HTTP request**, driven by an explicit `trigger` field, not LangGraph's `interrupt()`/`Command(resume=...)` (Module 5) | The pinned `langgraph==0.2.76` interrupt API was newer/less battle-tested at the time; a full-state-in, full-state-out invocation per turn maps directly onto API.md's documented "synchronous, returns evaluation + next question" contract and keeps recoverability entirely in Postgres (decision #10), not dependent on resuming a specific graph node |
+| 10 | Recoverability for "stop mid-question, resume later" comes from **Postgres + idempotent retry**, not from resuming a LangGraph checkpoint (Module 5) | `InterviewExecutionService` rebuilds `InterviewState` fresh from `interview_sessions`/`interview_rounds`/`questions`/`answers` every turn; the LangGraph Postgres checkpointer is real and verified working (Database.md §9) but is defense-in-depth, not the load-bearing recovery mechanism — simpler to reason about and test than mid-node graph resume, and already sufficient for the stated requirement |
+| 11 | Adaptive difficulty is a **pure deterministic function** of `technical_score`/`problem_solving_score` (`app/agents/policy.py`), never LLM-proposed (Module 5) | `>=80` increase / `<=40` decrease / else maintain, clamped at `easy`/`hard`. The wide 40–80 dead zone is the anti-oscillation mechanism. Matches the explicit instruction that an LLM must never freely decide difficulty |
+| 12 | Follow-up decision (FOLLOW_UP/NEXT_QUESTION/NEXT_ROUND/COMPLETE) is the Supervisor's **deterministic threshold logic** over a structured `follow_up_worthy` flag the Evaluation Agent sets; only the follow-up's *question text* is LLM-generated (Module 5) | Keeps "should we probe deeper" auditable and bounded (`MAX_FOLLOW_UPS_PER_QUESTION`) without an LLM choosing its own graph transition |
+| 13 | Round length (target question count per round type) is a **Module-5-owned policy constant** (`app/agents/policy.py::DEFAULT_QUESTIONS_PER_ROUND`), not a `template_rounds` column (Module 5) | Module 4's schema (approved, not reopened) has no such column; treating round length as an execution-engine policy rather than a plan attribute avoids touching an already-shipped table for a Module 5-only need |
 
 ---
 

@@ -78,7 +78,7 @@ Inactive companies/roles/templates are excluded from every listing above and fro
 
 ## 4. Interview Sessions
 
-**Status: the planning subset below (creation, listing, retrieval, plan snapshot) is implemented in Module 4. `/start`, `/current-turn`, `/answers`, `/abandon` remain unimplemented — they require the LangGraph Supervisor, which is Module 5's scope (Roadmap.md).**
+**Status: fully implemented.** The planning subset (creation, listing, retrieval, plan snapshot) is Module 4; `/start`, `/current-turn`, `/answers`, `/abandon` are Module 5, backed by the LangGraph engine (Architecture.md §5). `/code-submissions` (coding rounds) remains Module 6 — a `coding` round in a plan is cleanly skipped (`InterviewRound.status=skipped`, never executed/faked), see §7 below.
 
 | Method | Path | Description | Auth |
 |---|---|---|---|
@@ -86,33 +86,74 @@ Inactive companies/roles/templates are excluded from every listing above and fro
 | GET | `/interview-sessions` | List current user's sessions, filterable by `?status=` | required |
 | GET | `/interview-sessions/{id}` | Session detail (status, current round, current/starting/requested difficulty) | required |
 | GET | `/interview-sessions/{id}/plan` | The full immutable plan snapshot: company/role/template labels, ordered rounds, difficulty resolution + reasons, resume-derived personalization (if any) | required |
-| POST | `/interview-sessions/{id}/start` | *(Module 5)* Transitions `not_started → in_progress`, Supervisor emits the first question | required |
-| GET | `/interview-sessions/{id}/current-turn` | *(Module 5)* Current question + round context (what the candidate should see right now) | required |
-| POST | `/interview-sessions/{id}/answers` | *(Module 5)* Submit a text answer to the current question — synchronous, returns evaluation + next question (§5.3 of Architecture.md) | required |
-| POST | `/interview-sessions/{id}/abandon` | *(Module 5)* Mark session `abandoned` | required |
+| POST | `/interview-sessions/{id}/start` | *(Module 5)* `not_started → in_progress`; the Question Generator Agent produces the first question | required |
+| GET | `/interview-sessions/{id}/current-turn` | *(Module 5)* Current pending question + round/difficulty context — pure read, zero LLM calls, safe to poll | required |
+| POST | `/interview-sessions/{id}/answers` | *(Module 5)* Submit a text answer to a specific question — synchronous, returns evaluation + next question (§5.3 of Architecture.md) | required |
+| POST | `/interview-sessions/{id}/abandon` | *(Module 5)* Mark session `abandoned` — only from `not_started`/`in_progress` | required |
 
-**Deviations from this document's original draft body**, both documented inline in `app/schemas/interview.py`:
-- `difficulty_override` → `difficulty`, an enum of `easy`/`medium`/`hard`/`auto` (default `auto`) rather than a bare optional override. `auto` resolves deterministically from the selected resume's already-computed `resume_gap_analysis.recommended_difficulty` (Module 3) when one is available and matches, or from the documented safe default (`medium`) otherwise — never via an LLM call. Both the raw request (`requested_difficulty`) and the resolved value (`starting_difficulty`) are persisted, since Module 5's Difficulty Agent will mutate a third, separate field (`current_difficulty`) during the interview itself.
-- Added optional `mode` (`full_mock`/`technical_only`/`coding_only`/`behavioral_only`/`resume_deep_dive`) — inherited from the selected template if omitted, and must match the template's own mode exactly if given (a plan request never dynamically re-filters a template's rounds).
-- `resume_id` is optional and, if omitted, falls back to the candidate's active analyzed resume; a resume is only strictly required when the mode is `resume_deep_dive` or the template includes a `resume_discussion` round. An explicitly-selected resume must belong to the requesting user (else `404`) and have `parsed_status=done` (else `409 RESUME_NOT_READY`) — never silently substituted.
+**Deviations from this document's original draft body**, all documented inline in the relevant schema module:
+- `difficulty_override` → `difficulty`, an enum of `easy`/`medium`/`hard`/`auto` (default `auto`) rather than a bare optional override (`app/schemas/interview.py`). `auto` resolves deterministically from the selected resume's already-computed `resume_gap_analysis.recommended_difficulty` (Module 3) when one is available and matches, or from the documented safe default (`medium`) otherwise — never via an LLM call. Both the raw request (`requested_difficulty`) and the resolved value (`starting_difficulty`) are persisted, distinct from `current_difficulty` (Module 5's Difficulty Agent mutates only this third field during the interview).
+- Added optional `mode` (`full_mock`/`technical_only`/`coding_only`/`behavioral_only`/`resume_deep_dive`) — inherited from the selected template if omitted, and must match the template's own mode exactly if given.
+- `resume_id` is optional and, if omitted, falls back to the candidate's active analyzed resume; required when the mode is `resume_deep_dive` or the template includes a `resume_discussion` round.
+- **`POST .../answers`'s body is `{ question_id, answer_text }`** (`app/schemas/interview_turn.py::AnswerSubmitRequest`) — requiring `question_id` explicitly, rather than implicitly "the current question," makes staleness/idempotency unambiguous: a request naming a question that isn't the session's current pending one is a clean `409 STALE_QUESTION_ID`, and a request naming an already-answered question replays the recorded result rather than erroring or re-evaluating (module §5, §22 — "duplicate answer retry does not duplicate turns").
+- **`next` has only two shapes, not three** — `{"type":"question","question":{...}}` or `{"type":"session_complete"}` (no `report_id` — Module 7's report generator doesn't exist yet, so it's omitted rather than fabricated). There is no separate `"round_complete"` pause state: the engine always eagerly generates the next round's opening question in the same turn, so the client never needs an extra round-trip just to learn what round it's now in — `GET .../current-turn` still reports the current round if the client wants to display a "round complete" transition.
 
 Every path above enforces resource ownership the same way §2 Resumes does — a session ID belonging to another user resolves as `404 RESOURCE_NOT_FOUND` (specifically `code=INTERVIEW_NOT_FOUND`) on every method, never `403`.
+
+### `POST /interview-sessions/{id}/start` — response shape
+
+```json
+{
+  "interview_id": "uuid",
+  "status": "in_progress",
+  "current_round": "introduction",
+  "current_difficulty": "medium",
+  "question": { "id": "uuid", "question_text": "...", "topic": "...", "difficulty": "medium", "round_type": "introduction", "parent_question_id": null }
+}
+```
+
+### `GET /interview-sessions/{id}/current-turn` — response shape
+
+```json
+{
+  "interview_id": "uuid",
+  "status": "in_progress",
+  "current_round": "technical",
+  "current_difficulty": "hard",
+  "question": { "id": "uuid", "question_text": "...", "topic": "...", "difficulty": "hard", "round_type": "technical", "parent_question_id": null },
+  "interview_complete": false
+}
+```
 
 ### `POST /interview-sessions/{id}/answers` — response shape
 
 ```json
 {
+  "interview_id": "uuid",
+  "status": "in_progress",
   "evaluation": {
     "technical": { "score": 82, "explanation": "..." },
     "problem_solving": { "score": 75, "explanation": "..." },
     "communication": { "score": 90, "explanation": "..." },
-    "confidence": { "score": 70, "explanation": "..." }
+    "confidence": { "score": 70, "explanation": "..." },
+    "difficulty_signal": "increase"
   },
-  "difficulty_signal": "increase",
+  "previous_difficulty": "medium",
+  "current_difficulty": "hard",
   "next": { "type": "question", "question": { "...": "..." } }
-  // OR "next": { "type": "round_complete" } / { "type": "session_complete", "report_id": "..." }
+  // OR "next": { "type": "session_complete" }
 }
 ```
+
+`evaluation.confidence` is the observable directness/assertiveness of the candidate's *phrasing* (hedging vs. decisive language) — never a psychological or personality inference (module §9, §11's explicit prohibition; see `app/services/interview_intelligence/schemas.py::CommunicationEvaluation`'s docstring). No field in any Module 5 response carries internal agent reasoning/chain-of-thought (module §20) — only scores, explanations, and structured flags a candidate would find useful.
+
+### `POST /interview-sessions/{id}/abandon` — response shape
+
+```json
+{ "interview_id": "uuid", "status": "abandoned", "completed_at": "2026-01-01T00:00:00Z" }
+```
+
+`409 INVALID_STATE_TRANSITION` if the interview is already `completed`/`abandoned`.
 
 ---
 
