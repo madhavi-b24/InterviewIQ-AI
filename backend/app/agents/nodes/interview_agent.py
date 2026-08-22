@@ -50,6 +50,7 @@ def make_interview_agent_node(
             "round_type": state["current_round"],
             "difficulty": state["current_difficulty"],
             "parent_question_id": last_question["id"],
+            "coding_problem_id": None,  # follow-ups never target coding rounds (module §8)
         }
         return {"current_question": question_ref}
 

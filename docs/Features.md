@@ -54,7 +54,7 @@ Legend: **MVP** = required for first working product · **Later** = designed for
 |---|---|---|
 | Introduction round | MVP | `interview_rounds`, Interview Agent |
 | Technical round | MVP | Question Generator + Knowledge Agent |
-| Coding round with real execution | MVP | `question_test_cases`, `code_submissions`, Code Execution Adapter |
+| Coding round with real execution | **Implemented (Module 6)** | `question_test_cases`, `code_submissions`, `DockerSandboxExecutor` — see §6 below |
 | Behavioral round | MVP | Question Generator (STAR-aware prompting) |
 | System design round | Later | question type exists (`questions.question_type = system_design`); no dedicated evaluation rubric yet — grouped under generic technical evaluation for MVP |
 | Resume discussion round | MVP | Question Generator using `resume_context` |
@@ -77,16 +77,21 @@ Legend: **MVP** = required for first working product · **Later** = designed for
 
 ## 6. Coding Evaluation
 
+**Status: implemented (Module 6).** See backend/README.md's "Coding Round & Code Execution (Module 6)" section for the full design writeup, and Architecture.md §6 for the sandbox's layered isolation model.
+
 | Feature | Scope | Depends on |
 |---|---|---|
-| Real sandboxed code execution against test cases | MVP | `question_test_cases`, `code_submissions`, `code_submission_test_results`, `DockerSandboxExecutor` |
-| "Run" against sample cases before final "Submit" (multi-attempt, only final graded) | MVP | `code_submissions.attempt_no/is_final` |
-| Correctness score computed from execution (not LLM) | MVP | `coding_evaluations.correctness_score` |
-| Readability + optimization scoring (LLM) | MVP | `coding_evaluations.readability_score/optimization_score` |
-| Time/space complexity estimate | MVP | `coding_evaluations.time_complexity/space_complexity` |
-| Multi-language support | MVP (start with Python + JavaScript, expand later) | `code_submissions.language` is free text already |
-| Judge0 backend swap | Later | `CodeExecutor` interface designed for this from day one |
+| Real sandboxed code execution against test cases | **Implemented** | `question_test_cases`, `code_submissions`, `code_submission_test_results`, `DockerSandboxExecutor` calling a dedicated sibling `executor` container (never a Docker socket, never in-process) |
+| Maintainable coding-problem catalog (arrays, strings, hash maps, binary search, stacks/queues, trees, graphs, dynamic programming) | **Implemented** | `coding_problems`/`coding_problem_test_cases`, seed-driven (`app/services/coding/data/coding_problems.json`) — a small, hand-verified 8-problem catalog rather than hundreds of generated ones, per this module's explicit "prefer quality over quantity" instruction |
+| "Run" against sample cases before final "Submit" (multi-attempt, only final graded) | **Implemented** | `code_submissions.attempt_no/is_final` |
+| Correctness score computed from execution (not LLM) | **Implemented** | `coding_evaluations.correctness_score` |
+| Readability + optimization + edge-case scoring (LLM) | **Implemented** | `coding_evaluations.readability_score/optimization_score/edge_case_score` |
+| Time/space complexity estimate | **Implemented** | `coding_evaluations.time_complexity/space_complexity` |
+| Deterministic overall code score (weighted combination, never LLM-set) | **Implemented** | `coding_evaluations.overall_code_score`, `app/agents/policy.py::compute_overall_code_score` |
+| Multi-language support | **Implemented — Python, Java, C++** | `code_submissions.language`, `execution_worker/languages.py`'s fixed, server-controlled language configs. **Deviation from this document's earlier draft** ("start with Python + JavaScript") — this module's task explicitly specified Python/Java/C++ instead; corrected here rather than silently left stale. |
+| Judge0 backend swap | Later | `CodeExecutor` interface designed for this from day one; only `DockerSandboxExecutor`/`FakeCodeExecutor` exist today |
 | Live syntax/error hints while typing | Later | pure frontend/Monaco feature, no backend dependency |
+| Per-execution memory usage reported to the candidate | Later | the sandbox enforces a memory *limit* (`RLIMIT_AS`) but does not currently measure and report peak usage — `code_submissions.peak_memory_kb` stays `null` |
 
 ---
 

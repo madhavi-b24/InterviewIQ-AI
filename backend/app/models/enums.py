@@ -114,12 +114,26 @@ class QuestionSource(StrEnum):
 
 
 class CodeExecutionStatus(StrEnum):
+    """Module 1 baseline: QUEUED/RUNNING (submission lifecycle),
+    SUCCESS/PARTIAL (aggregate outcome), ERROR/TIMEOUT (generic failure).
+    Module 6 extends the failure states with the specific reasons module
+    §7 asks for — COMPILE_ERROR/RUNTIME_ERROR/MEMORY_LIMIT/OUTPUT_LIMIT
+    are new; TIME_LIMIT reuses the existing TIMEOUT value (same concept,
+    no need for a near-duplicate), and EXECUTION_ERROR reuses the
+    existing generic ERROR value — see docs/Database.md §5 for the full
+    mapping. Additive only: no existing value's meaning changed.
+    """
+
     QUEUED = "queued"
     RUNNING = "running"
     SUCCESS = "success"
     PARTIAL = "partial"
-    ERROR = "error"
-    TIMEOUT = "timeout"
+    ERROR = "error"  # = module §7's EXECUTION_ERROR
+    TIMEOUT = "timeout"  # = module §7's TIME_LIMIT
+    COMPILE_ERROR = "compile_error"
+    RUNTIME_ERROR = "runtime_error"
+    MEMORY_LIMIT = "memory_limit"
+    OUTPUT_LIMIT = "output_limit"
 
 
 class DifficultySignal(StrEnum):

@@ -1,8 +1,21 @@
-# Local/dev topology — Architecture.md §9. The execution sandbox and a
-# Celery worker are deliberately not here yet; both are deferred to the
-# modules that implement them (Roadmap.md Module 6 / Module 9).
+# Local/dev topology — Architecture.md §9. A Celery worker is deliberately
+# not here yet (Roadmap.md Module 9). The execution sandbox (Module 6) IS
+# here now: `executor` is a dedicated sibling container `backend` talks to
+# over plain HTTP (never a Docker-socket mount, never candidate code
+# inside the `backend` container itself — module §4). It sits on
+# `sandbox_internal`, a network with `internal: true` — Docker refuses to
+# route that network anywhere outside the Compose project, so `executor`
+# has no path to the internet or the host regardless of anything a
+# sandboxed subprocess inside it tries. `backend` is the only other
+# service on that network (so it can reach `executor`); `postgres`/
+# `redis`/`chromadb` are not, and don't need to be.
 #
 # frontend is intentionally absent until the frontend scaffold is built.
+
+networks:
+  default: {}
+  sandbox_internal:
+    internal: true
 
 services:
   postgres:
@@ -50,12 +63,22 @@ services:
       REDIS_URL: redis://redis:6379/0
       CHROMA_HOST: chromadb
       CHROMA_PORT: 8000
+      # Module 6 — the sandbox executor's internal-network hostname.
+      EXECUTOR_BASE_URL: http://executor:8100
     ports:
       - "8000:8000"
+    networks:
+      # default: talks to postgres/redis/chromadb + the internet (Gemini).
+      # sandbox_internal: the only other service on it is `executor` — see
+      # the top-of-file comment for why that network has no internet route.
+      - default
+      - sandbox_internal
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      executor:
         condition: service_healthy
     volumes:
       - ./backend/app:/app/app
@@ -65,6 +88,80 @@ services:
       # resumes survive `docker compose down`/container recreation, same
       # pattern as postgres_data/chroma_data below.
       - resume_data:/app/data
+
+  executor:
+    build:
+      context: ./backend/execution_worker
+    networks:
+      # ONLY this network — internal: true means no route to the internet
+      # or host, period, regardless of anything a sandboxed subprocess
+      # inside this container tries (module §5's network-isolation
+      # requirement, enforced by Docker's own networking layer, not an
+      # app-level flag that could be misconfigured or bypassed).
+      - sandbox_internal
+    # No `env_file`, no secret env vars, no volumes mounting project
+    # source or host paths — this container never receives application
+    # secrets or code beyond its own execution_worker/ image (module §4).
+    read_only: true
+    tmpfs:
+      # The only writable path in the whole container — every execution's
+      # scratch directory (tempfile.TemporaryDirectory()) lives here and
+      # is deleted when that context manager exits. size= caps how much a
+      # single or concurrent set of executions could ever occupy.
+      # `exec` (Module 6 final-review fix): Docker's tmpfs mounts default
+      # to `noexec`, which silently broke every C++ submission — g++
+      # compiled the binary successfully, but the kernel refused to exec()
+      # it (`PermissionError: [Errno 13] Permission denied: './solution'`,
+      # confirmed live, not assumed). Python/Java were unaffected (their
+      # own interpreter/JVM binaries live in /usr/bin, never in /tmp; only
+      # a native-compiled executable needs *itself* to be exec()able from
+      # here). This is a necessary, deliberate relaxation, not a
+      # meaningful isolation loss — this container's only job is to run
+      # candidate-submitted code, so "code written to /tmp can execute" is
+      # the whole point, not a new attack surface; network isolation,
+      # non-root, cap_drop, resource limits, and the absence of secrets or
+      # project source are what actually bound what that execution can do.
+      - /tmp:size=128m,mode=1777,exec
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Container-level backstop, on top of (not instead of) the per-process
+    # RLIMIT_AS/RLIMIT_CPU/RLIMIT_NPROC in execution_worker/sandbox_runner.py
+    # — this closes a real gap: those rlimits bound one candidate SUBPROCESS
+    # at a time, but nothing previously bounded the CONTAINER's aggregate
+    # usage across concurrent submissions (verified missing via
+    # `docker inspect`, not assumed). mem_limit=4g accommodates Java's
+    # RLIMIT_AS override (languages.py — the JVM needs ~3GB of *virtual*
+    # address space headroom; actual resident usage stays far lower,
+    # bounded by the `-Xmx`/`-XX:MaxMetaspaceSize` heap caps passed
+    # directly to javac/java) while still giving headroom for a few
+    # concurrent executions without starving the host; pids_limit=256 is a
+    # genuine container-wide fork-bomb backstop for the exact shared-uid
+    # caveat sandbox_runner.py's own module docstring already documents
+    # (RLIMIT_NPROC alone is a shared budget across the whole container,
+    # not a hard per-execution guarantee) — raised from an initial 128
+    # after empirically finding the JVM alone needs up to ~112 of that
+    # budget for its own internal threads. cpus=4.0 (raised from an initial
+    # 2.0 during final review): a real `#include <bits/stdc++.h>` compile
+    # (an ordinary, legitimate C++ idiom, not a pathological case) measured
+    # ~11.4s uncontended under 2.0 CPUs, and a live "Compilation timed out."
+    # was reproduced under concurrent load at that setting — 4.0 gives
+    # concurrent compiles genuine headroom while remaining a real, meaningful
+    # cap (half the host's 8 cores, leaving room for
+    # backend/postgres/redis/chromadb), paired with the compile timeout
+    # itself also being raised (see execution_worker/sandbox_runner.py's
+    # _COMPILE_TIMEOUT_SECONDS).
+    mem_limit: 4g
+    cpus: 4.0
+    pids_limit: 256
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No `ports:` — never reachable from the host, only from `backend`
+    # over the internal network.
 
 volumes:
   postgres_data:

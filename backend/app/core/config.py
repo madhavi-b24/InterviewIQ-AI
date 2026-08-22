@@ -80,8 +80,12 @@ class Settings(BaseSettings):
     GEMINI_EMBEDDING_MODEL: str = "text-embedding-004"
 
     # --- Pluggable backends (Architecture.md §6, §8.1) — config selects the
-    # implementation, services depend only on the Protocol.
-    CODE_EXECUTION_BACKEND: Literal["docker_sandbox", "judge0"] = "docker_sandbox"
+    # implementation, services depend only on the Protocol. "fake"
+    # (Module 6) exists only so tests can exercise the coding-round flow
+    # deterministically without a running `executor` container — same
+    # rationale/production-guard as every other "fake" option below (see
+    # app/execution/factories.py).
+    CODE_EXECUTION_BACKEND: Literal["docker_sandbox", "judge0", "fake"] = "docker_sandbox"
     JOB_RUNNER_BACKEND: Literal["background_tasks", "celery"] = "background_tasks"
 
     # --- Resume Intelligence (Module 3) ---------------------------------
@@ -119,6 +123,27 @@ class Settings(BaseSettings):
     # app/services/interview_intelligence/factories.py).
     INTERVIEW_ENGINE_PROVIDER: Literal["gemini", "fake"] = "gemini"
     INTERVIEW_ENGINE_TIMEOUT_SECONDS: int = 45
+
+    # --- Code Execution Subsystem (Module 6) -----------------------------
+    # DockerSandboxExecutor (app/execution/docker_sandbox.py) never talks to
+    # Docker directly — it calls a dedicated sibling `executor` container
+    # (backend/execution_worker/) over plain HTTP. That container has no
+    # Docker socket, no project source, no application secrets, and sits on
+    # a Compose network with `internal: true` (no route to the internet or
+    # host) — see docker-compose.yml and docs/Architecture.md §6.
+    EXECUTOR_BASE_URL: str = "http://executor:8100"
+    CODE_EXECUTION_TIMEOUT_SECONDS: int = 10
+    CODE_EXECUTION_MEMORY_LIMIT_MB: int = 256
+    CODE_EXECUTION_MAX_OUTPUT_BYTES: int = 65536
+
+    # CodeEvaluationProvider (app/services/code_evaluation/) — the LLM-backed
+    # seam behind readability/optimization/edge-case judgment of a *final*
+    # code submission only. correctness_score is never produced by this
+    # provider — it's computed from code_submission_test_results before the
+    # provider is ever called (module §10). Same "fake" rationale/
+    # production-guard as INTERVIEW_ENGINE_PROVIDER above.
+    CODE_EVALUATION_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    CODE_EVALUATION_TIMEOUT_SECONDS: int = 45
 
 
 @lru_cache

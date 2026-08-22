@@ -42,6 +42,8 @@ erDiagram
     INTERVIEW_SESSIONS }o--|| INTERVIEW_TEMPLATES : instantiates
     INTERVIEW_SESSIONS ||--o{ INTERVIEW_ROUNDS : contains
     INTERVIEW_ROUNDS ||--o{ QUESTIONS : contains
+    CODING_PROBLEMS ||--o{ CODING_PROBLEM_TEST_CASES : has
+    CODING_PROBLEMS ||--o{ QUESTIONS : selected_as
     QUESTIONS ||--o{ QUESTION_TEST_CASES : has
     QUESTIONS ||--o| ANSWERS : answered_by
     ANSWERS ||--o{ CODE_SUBMISSIONS : has_attempts
@@ -341,7 +343,7 @@ Unique: `(session_id, sequence_no)`.
 
 ### `questions`
 
-**Status: implemented in Module 5** (`reference_answer`/`vector_ref`/`source=bank` remain unused — no question bank or Knowledge Agent RAG retrieval yet, see backend/README.md's Module 5 "Known limitations"; every Module 5 question has `source=generated`).
+**Status: implemented in Module 5 (text rounds), extended in Module 6 (coding rounds)** (`reference_answer`/`vector_ref`/`source=bank` remain unused for text rounds — no question bank or Knowledge Agent RAG retrieval yet, see backend/README.md's Module 5 "Known limitations"; every Module 5 question has `source=generated`). A coding question, by contrast, always has `source=bank` (it's a deterministic catalog pick, never LLM-generated — module §8) and populates `coding_problem_id`/`coding_snapshot`.
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -349,19 +351,58 @@ Unique: `(session_id, sequence_no)`.
 | round_id | uuid | FK → interview_rounds.id, cascade |
 | topic | text | not null |
 | difficulty | enum(`easy`,`medium`,`hard`) | not null |
-| question_text | text | not null |
-| question_type | enum(`mcq`,`open`,`coding`,`system_design`) | not null — Module 5 only ever writes `open` or `system_design` (never `mcq`/`coding`) |
+| question_text | text | not null — for `question_type=coding`, the catalog problem's `description` |
+| question_type | enum(`mcq`,`open`,`coding`,`system_design`) | not null — Module 5 writes `open`/`system_design`; Module 6 adds real `coding` rows (never `mcq`) |
 | reference_answer | text | nullable — from Knowledge Agent retrieval, used only for evaluation grounding |
 | source | enum(`bank`,`generated`) | not null |
 | vector_ref | text | nullable — ChromaDB doc id if sourced from `question_bank` |
 | asked_at | timestamptz | not null |
-| parent_question_id | uuid | FK → questions.id, `ON DELETE SET NULL`, nullable — *(Module 5)* self-referential; set when this question is a follow-up (Interview Agent, module §8) to the question named here. `null` for a fresh, round-opening question (Question Generator Agent). Chains can be more than one level deep (a follow-up can itself be followed up, capped by `MAX_FOLLOW_UPS_PER_QUESTION`, `app/agents/policy.py`) — root-question identity for round-length/duplicate-tracking purposes is found by walking this chain, not stored redundantly. |
+| parent_question_id | uuid | FK → questions.id, `ON DELETE SET NULL`, nullable — *(Module 5)* self-referential; set when this question is a follow-up (Interview Agent, module §8) to the question named here. `null` for a fresh, round-opening question (Question Generator Agent) and always `null` for a coding question (coding questions never have follow-ups, module §8). Chains can be more than one level deep (a follow-up can itself be followed up, capped by `MAX_FOLLOW_UPS_PER_QUESTION`, `app/agents/policy.py`) — root-question identity for round-length/duplicate-tracking purposes is found by walking this chain, not stored redundantly. |
+| coding_problem_id | uuid | FK → coding_problems.id, `ON DELETE RESTRICT`, nullable — *(Module 6)* which catalog problem this is a snapshot of. `null` for every non-coding question. RESTRICT mirrors `interview_rounds.template_round_id`: a catalog problem already asked in a live interview can be deactivated but never deleted out from under that history. |
+| coding_snapshot | jsonb | nullable — *(Module 6)* the catalog problem's remaining content (`title`, `constraints`, `expected_time_complexity`, `expected_space_complexity`, `supported_languages`, `starter_code`, `topics`) captured **at selection time**, immune to later catalog edits — the same "catalog is mutable, live instances are immutable copies" rule `interview_sessions.plan_snapshot` already established. `null` for every non-coding question. |
 
-Index: `(round_id)`. Creates a circular FK reference across `interview_sessions.current_question_id` → `questions` → `interview_rounds` → `interview_sessions` — intentional and safe (both new FKs are nullable with `ON DELETE SET NULL`; see `4df563d9a10b_interview_execution.py`'s docstring).
+Indexes: `(round_id)`, `(coding_problem_id)`. Creates a circular FK reference across `interview_sessions.current_question_id` → `questions` → `interview_rounds` → `interview_sessions` — intentional and safe (both new FKs are nullable with `ON DELETE SET NULL`; see `4df563d9a10b_interview_execution.py`'s docstring).
+
+### `coding_problems` / `coding_problem_test_cases` *(Module 6 — new tables)*
+
+The coding-problem **catalog** — maintainable, seed-driven data (`app/services/coding/data/coding_problems.json` + `catalog_seed.py`'s idempotent upsert, module §8's "do not hardcode coding problems directly inside service methods"), mirroring `interview_templates`/`template_rounds`'s shape and seeding pattern exactly. Selecting a problem for a round never points a live `Question` at these rows directly — it SNAPSHOTS the content into `Question`/`question_test_cases` (see above), so editing this catalog never changes a question a candidate has already been asked.
+
+**`coding_problems`**
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK |
+| slug | text | unique, indexed — natural key for idempotent seeding, never exposed to clients as "the" id |
+| title | text | not null |
+| description | text | not null — the full problem statement |
+| difficulty | enum(`easy`,`medium`,`hard`) | not null |
+| topics | jsonb | not null, default `[]` — free-form tags (arrays, hash_maps, binary_search, stacks_queues, trees, graphs, dynamic_programming, strings, ...); catalog labels, not something code branches on |
+| constraints | text | nullable |
+| expected_time_complexity | text | nullable |
+| expected_space_complexity | text | nullable |
+| supported_languages | jsonb | not null, default `[]` — e.g. `["python","java","cpp"]`; must be a subset of the execution worker's configured languages |
+| starter_code | jsonb | not null, default `{}` — `{language: scaffold}`, optional per-language I/O scaffolding, never a working solution |
+| role_keys | jsonb | not null, default `[]` — optional role-priority metadata (same taxonomy as `app/services/resume/role_profiles.json`); empty matches every role |
+| is_active | boolean | not null, default `true` |
+| created_at | timestamptz | not null |
+
+**`coding_problem_test_cases`**
+
+| Column | Type | Constraints |
+|---|---|---|
+| id | uuid | PK |
+| problem_id | uuid | FK → coding_problems.id, cascade |
+| input | text | not null |
+| expected_output | text | not null |
+| is_sample | boolean | not null, default `false` |
+| weight | numeric(4,2) | not null, default `1.00` |
+| sequence_no | int | not null |
+
+Unique: `(problem_id, sequence_no)`. Indexed: `(problem_id)`.
 
 ### `question_test_cases`
 
-Only populated for `question_type = coding`. Backs the real execution engine — this is what `CodeExecutor` runs the candidate's code against.
+Only populated for `question_type = coding` — the **live, snapshotted** copy of a `coding_problem_test_cases` row at the moment a problem was selected for a round (never a live reference back to the catalog). Backs the real execution engine — this is what `CodeExecutor` runs the candidate's code against. Hidden (`is_sample=false`) rows are never exposed via any API response (module §8) — only their aggregate pass/fail counts are.
 
 | Column | Type | Constraints |
 |---|---|---|
@@ -389,30 +430,33 @@ Unique: `(question_id, sequence_no)`.
 
 ### `code_submissions`
 
-One row per **attempt**, not per question — a candidate may "Run" against sample test cases any number of times before the one "Submit" that counts. `is_final` marks that one graded attempt.
+**Status: implemented in Module 6.** One row per **attempt**, not per question — a candidate may "Run" against sample test cases any number of times before the one "Submit" that counts. `is_final` marks that one graded attempt.
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | answer_id | uuid | FK → answers.id, cascade |
 | attempt_no | int | not null — 1, 2, 3... per answer, assigned server-side |
-| is_final | boolean | not null, default false |
+| is_final | boolean | not null, default false — see the "release on infra failure" note below; this is not simply write-once |
 | language | text | not null |
 | source_code | text | not null |
-| execution_status | enum(`queued`,`running`,`success`,`partial`,`error`,`timeout`) | not null, default `queued` |
-| executor | text | nullable — e.g. `docker_sandbox_v1`, `judge0`, for audit/debugging |
-| passed_test_count | int | nullable — populated once executed |
+| execution_status | enum(`queued`,`running`,`success`,`partial`,`error`,`timeout`,`compile_error`,`runtime_error`,`memory_limit`,`output_limit`) | not null, default `queued` — the last 4 values are Module 6 additions (granular failure reasons); `timeout`/`error` are reused as-is for the "TIME_LIMIT"/"EXECUTION_ERROR" concepts rather than adding near-duplicate values (see `app/models/enums.py::CodeExecutionStatus`'s docstring for the full mapping) |
+| executor | text | nullable — e.g. `docker_sandbox_v1`, `judge0`, for audit/debugging (not currently populated — the executor identity is implied by config, not written per-row) |
+| passed_test_count | int | nullable — populated once executed; unweighted count |
 | total_test_count | int | nullable |
 | total_runtime_ms | int | nullable |
-| peak_memory_kb | int | nullable |
+| peak_memory_kb | int | nullable — not populated by the MVP sandbox (memory isn't measured per-execution, only limited — see backend/README.md's Module 6 "Known limitations") |
+| error_message | text | nullable — *(Module 6)* the compiler's own message (`compile_error`) or a genuine sandbox/evaluation-provider infra failure message; `null` for every other outcome (wrong-answer/runtime detail already lives per-test in `code_submission_test_results.stderr`) |
 | created_at | timestamptz | not null |
 | graded_at | timestamptz | nullable — set only when `is_final = true` and full evaluation has run |
 
-Unique: `(answer_id, attempt_no)`. Partial unique index `(answer_id) WHERE is_final` — at most one final attempt per answer.
+Unique: `(answer_id, attempt_no)`. Partial unique index `(answer_id) WHERE is_final` — at most one final attempt per answer, enforced by the DB, not just application logic (the real backstop for concurrent Submit requests, module §22).
 
 **Scope of execution differs by attempt type:**
 - `is_final = false` ("Run"): executes only against `question_test_cases WHERE is_sample = true`. No `coding_evaluations` row is produced — execution only, no LLM call. This keeps iterative testing fast and free of LLM cost.
 - `is_final = true` ("Submit"): executes against **all** test cases (sample + hidden), and is the only attempt that produces a `coding_evaluations` row.
+
+**`is_final` can be released back to `false`** (Module 6, `CodingRoundService._release_final_slot_on_infra_failure`) — but *only* when grading never reached a genuine verdict because OUR infrastructure failed (the sandbox was unreachable, or the code-evaluation LLM call failed), freeing the partial-unique slot so the candidate can submit again. A candidate outcome that genuinely ran — success, partial, a compile error, a runtime error, a timeout — is always a final, graded verdict and never triggers this; only `execution_status=error` (a bare infra failure, distinct from every candidate-caused status) ever does.
 
 ### `code_submission_test_results`
 
@@ -456,21 +500,29 @@ Unique: `(code_submission_id, test_case_id)`.
 
 ### `coding_evaluations`
 
-Produced by the Evaluation Agent from the **final** (`is_final = true`) `code_submission` only — non-final "Run" attempts are never evaluated. `correctness_score` is **computed from `code_submission_test_results`, not LLM-guessed** — see [Architecture.md](Architecture.md) §5.4. Only `readability_score` and `optimization_score` are LLM judgments.
+**Status: implemented in Module 6.** Produced from the **final** (`is_final = true`) `code_submission` only — non-final "Run" attempts are never evaluated, and a `compile_error` final submission gets a deterministic zero-evaluation row with no LLM call at all (there's no code behavior to judge quality of). `correctness_score` is **computed from `code_submission_test_results`, not LLM-guessed** — see [Architecture.md](Architecture.md) §5.4. `readability_score`/`optimization_score`/`edge_case_score` are the only LLM judgments (`CodeEvaluationProvider`, `app/services/code_evaluation/`) — the model is never asked about and never permitted to override correctness.
 
 | Column | Type | Constraints |
 |---|---|---|
 | id | uuid | PK |
 | code_submission_id | uuid | FK → code_submissions.id, cascade, unique |
-| correctness_score | numeric(5,2) | not null — weighted test pass rate × 100 |
-| correctness_explanation | text | not null — LLM-authored narrative over the execution results |
-| time_complexity | text | nullable — descriptive, e.g. `O(n log n)`, not a score |
+| correctness_score | numeric(5,2) | not null — weighted test pass rate × 100 (weighted by `question_test_cases.weight`, distinct from the unweighted `passed_test_count`/`total_test_count` on `code_submissions`) |
+| correctness_explanation | text | not null — a deterministic pass/fail-count sentence, not an LLM narrative |
+| time_complexity | text | nullable — the LLM's own Big-O estimate of the submitted approach, e.g. `O(n log n)`, descriptive, not a score |
 | space_complexity | text | nullable |
-| readability_score | numeric(5,2) | not null |
+| readability_score | numeric(5,2) | not null — LLM judgment: naming, structure, formatting, clarity |
 | readability_explanation | text | not null |
-| optimization_score | numeric(5,2) | not null |
+| optimization_score | numeric(5,2) | not null — LLM judgment: efficiency of the chosen approach relative to what the problem requires |
 | optimization_explanation | text | not null |
+| edge_case_score | numeric(5,2) | not null — *(Module 6)* LLM judgment: does the code's own logic handle empty input, boundary values, duplicates, etc. — judged from reading the code, never from which hidden tests happened to be included |
+| edge_case_explanation | text | not null |
+| overall_code_score | numeric(5,2) | not null — *(Module 6)* **deterministic** weighted combination of the five scores above (`app/agents/policy.py::compute_overall_code_score` — correctness 0.40, optimization 0.20, readability 0.15, edge_case 0.15, quality 0.10 reusing readability; module §11's "don't let the model freely decide the headline number", the same reasoning `answer_evaluations.difficulty_signal`'s policy uses) — never LLM-set |
+| strengths | jsonb | not null, default `[]` — *(Module 6)* concrete, specific strengths; empty when there are none, never invented |
+| weaknesses | jsonb | not null, default `[]` — *(Module 6)* |
+| recommendations | jsonb | not null, default `[]` — *(Module 6)* concrete, actionable suggestions for this exact submission |
 | created_at | timestamptz | not null |
+
+No chain-of-thought ever crosses into any column here (module §20) — every LLM-authored field is a score, a short evidence-citing explanation, or a structured list, never the model's internal reasoning.
 
 ---
 
@@ -596,7 +648,7 @@ Unique: `(user_id, snapshot_date)`.
 | `ratelimit:{user_id}:{route}` | Basic per-user rate limiting | rolling window |
 | `email_verify:{token}` | Email verification token | 24h |
 
-Redis is never authoritative — it can be flushed and the system recovers from Postgres. **Deviation (Module 5):** `session:{id}:hot_state` was not implemented — `GET /interview-sessions/{id}/current-turn` reads `interview_sessions.current_question_id` directly (one indexed FK lookup), which is fast enough at MVP scale without a caching layer. Left as a documented future optimization, not a design gap; nothing in Module 5 assumes it exists.
+Redis is never authoritative — it can be flushed and the system recovers from Postgres. **Deviation (Module 5):** `session:{id}:hot_state` was not implemented — `GET /interview-sessions/{id}/current-turn` reads `interview_sessions.current_question_id` directly (one indexed FK lookup), which is fast enough at MVP scale without a caching layer. Left as a documented future optimization, not a design gap; nothing in Module 5 assumes it exists. **Deviation (Module 6):** `submission:{id}:status` was not implemented either, same reasoning — `GET /interview-sessions/{id}/code-submissions/{id}` reads `code_submissions.execution_status` directly (one indexed PK lookup); Redis is not on the polling path anywhere in this codebase yet.
 
 ### ChromaDB (vector store)
 
@@ -627,6 +679,10 @@ Redis is never authoritative — it can be flushed and the system recovers from 
 | 7 *(Module 3)* | `resumes.is_active` + a partial unique index (`WHERE is_active`), not a separate "current resume" pointer table | Versioning requires many inactive historical rows per user to coexist; a partial unique index enforces "at most one active" at the DB level without a join |
 | 8 *(Module 3)* | `resume_gap_analysis` reused (extended additively) for both gap analysis *and* the interview-level recommendation, instead of a new table | Features.md already scopes both under one entity ("Gap analysis against a target role" / "Recommended starting difficulty from gap analysis"); the ER diagram's `||--o|` cardinality is preserved by a unique constraint on `resume_id`, so a re-request *replaces* the row rather than accumulating history |
 | 9 *(Module 3)* | `resume_education`/`resume_certifications`/`resume_achievements` added as new tables rather than jsonb columns on `resumes` | Matches the existing `resume_skills`/`resume_projects`/`resume_experience` pattern — queryable, indexable, and each row carries its own `evidence_text` for provenance |
+| 10 *(Module 6)* | `coding_problems`/`coding_problem_test_cases` added as a new catalog, seed-driven like `interview_templates`/`template_rounds` — a coding `Question` SNAPSHOTS the selected problem (`questions.coding_problem_id`/`coding_snapshot` + copied `question_test_cases` rows) rather than holding a live reference to the mutable catalog | Editing the catalog must never retroactively change a problem a candidate has already been asked, mirroring decision #3's reasoning for `interview_rounds` exactly |
+| 11 *(Module 6)* | `code_submissions.execution_status` extended additively (`compile_error`/`runtime_error`/`memory_limit`/`output_limit`), reusing the existing `timeout`/`error` values for the TIME_LIMIT/EXECUTION_ERROR concepts instead of adding near-duplicates | A genuinely new, distinguishable outcome gets a new value; a concept the enum already covered doesn't get a second name for it |
+| 12 *(Module 6)* | `code_submissions.is_final` can be released back to `false` after being set, exclusively on a genuine sandbox/evaluation-provider infrastructure failure — never on any candidate-caused outcome | The partial unique index enforces "at most one final submission," but an infra outage must not permanently lock a candidate out of ever submitting again for a question it never actually graded |
+| 13 *(Module 6)* | `coding_evaluations.overall_code_score` is a deterministic weighted combination of the five sub-scores, computed in application code, never asked of the LLM | Extends decision #4's "no LLM-guessed number" principle from correctness specifically to the headline aggregate score too |
 
 ---
 

@@ -1,0 +1,7 @@
+# Deliberately a plain requirements.txt, not the main backend's
+# uv-managed pyproject.toml — this is a small, standalone service with
+# exactly two real dependencies; a full lockfile setup is unwarranted
+# tooling overhead for it (see the Dockerfile for why it's built
+# separately from backend/ in the first place).
+fastapi==0.115.6
+uvicorn==0.32.1

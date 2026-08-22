@@ -7,7 +7,7 @@ number is ever stored, per the project's scoring standard.
 import uuid
 
 from sqlalchemy import ForeignKey, Numeric, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, CreatedAtMixin, UUIDPrimaryKeyMixin
@@ -41,10 +41,19 @@ class AnswerEvaluation(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
 
 
 class CodingEvaluation(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
-    """Produced by the Evaluation Agent from the final code_submission only.
-    correctness_score is computed from code_submission_test_results — see
-    Architecture.md §5.4 — not LLM-guessed. readability/optimization are
-    the only LLM-judged numbers here.
+    """Produced from the final code_submission only. correctness_score is
+    computed from code_submission_test_results — see Architecture.md
+    §5.4 — never LLM-guessed. readability/optimization/edge_case are LLM
+    judgments (CodeEvaluationProvider, Module 6 — module §10/§11); the LLM
+    never sets correctness_score or overall_code_score (the latter is a
+    deterministic weighted combination of the sub-scores computed in
+    CodingRoundService — module §10's "the LLM must never override the
+    execution result" extended to "must never freely pick the headline
+    number either", the same reasoning Module 5's difficulty policy uses).
+
+    edge_case_score/strengths/weaknesses/recommendations are additive
+    (Module 6) — everything above this comment is unchanged from Module 1's
+    baseline.
     """
 
     __tablename__ = "coding_evaluations"
@@ -63,3 +72,12 @@ class CodingEvaluation(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     readability_explanation: Mapped[str] = mapped_column(Text, nullable=False)
     optimization_score: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
     optimization_explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    # --- Module 6 additive columns ---------------------------------------
+    edge_case_score: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    edge_case_explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    # Deterministic weighted combination of the five scores above — see
+    # app/agents/policy.py::compute_overall_code_score. Never LLM-set.
+    overall_code_score: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    strengths: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    weaknesses: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    recommendations: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)

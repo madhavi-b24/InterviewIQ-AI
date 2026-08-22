@@ -78,7 +78,7 @@ Inactive companies/roles/templates are excluded from every listing above and fro
 
 ## 4. Interview Sessions
 
-**Status: fully implemented.** The planning subset (creation, listing, retrieval, plan snapshot) is Module 4; `/start`, `/current-turn`, `/answers`, `/abandon` are Module 5, backed by the LangGraph engine (Architecture.md §5). `/code-submissions` (coding rounds) remains Module 6 — a `coding` round in a plan is cleanly skipped (`InterviewRound.status=skipped`, never executed/faked), see §7 below.
+**Status: fully implemented.** The planning subset (creation, listing, retrieval, plan snapshot) is Module 4; `/start`, `/current-turn`, `/answers`, `/abandon` are Module 5, backed by the LangGraph engine (Architecture.md §5). Coding rounds execute for real as of Module 6 — see §5 below for the coding-problem/code-submission endpoints, nested under this same `/interview-sessions/{id}` resource.
 
 | Method | Path | Description | Auth |
 |---|---|---|---|
@@ -157,43 +157,70 @@ Every path above enforces resource ownership the same way §2 Resumes does — a
 
 ---
 
-## 5. Coding Submissions (Asynchronous, Multi-Attempt)
+## 5. Coding Rounds — Problem Retrieval & Code Submissions (Module 6)
 
-Matches the async Run-vs-Submit flow in Architecture.md §5.4. Every call creates a new **attempt** (`attempt_no` assigned server-side); `is_final` distinguishes a "Run" from the one "Submit" that gets graded.
+**Status: implemented.** Matches the async Run-vs-Submit flow in Architecture.md §5.4, with two documented deviations from this section's original sketch (both explained inline below): every endpoint is nested under `/interview-sessions/{id}`, not top-level `/code-submissions/{id}`, for the same ownership-enforcement consistency every other sub-resource in this API follows; and resubmitting after a final attempt **replays the existing final submission** (idempotent, matching every other duplicate-request case in this API — module §22) rather than erroring.
 
 | Method | Path | Description | Auth |
 |---|---|---|---|
-| POST | `/interview-sessions/{id}/code-submissions` | Body: `{ language, source_code, is_final }` (default `is_final: false`) → `202 Accepted { submission_id, attempt_no, is_final }` | required |
-| GET | `/code-submissions/{id}` | Poll status/result for one attempt | required |
-| GET | `/interview-sessions/{id}/questions/{question_id}/code-submissions` | List all attempts for this question, most recent first — powers an attempt-history view | required |
+| GET | `/interview-sessions/{id}/questions/{question_id}/coding-problem` | The candidate-facing problem statement: title, description, difficulty, constraints, expected complexity, starter code, supported languages, and **sample test cases only** — hidden test input/expected_output never appear here or anywhere else (module §8) | required |
+| POST | `/interview-sessions/{id}/questions/{question_id}/code-submissions` | Body: `{ language, source_code, is_final }` (default `is_final: false`) → `202 Accepted`, a `CodeSubmissionOut` reflecting the just-created (still `queued`) attempt — see the polling note below | required |
+| GET | `/interview-sessions/{id}/questions/{question_id}/code-submissions` | List all attempts for this question, most recent attempt_no first — powers an attempt-history view | required |
+| GET | `/interview-sessions/{id}/code-submissions/{submission_id}` | Poll status/result for one attempt | required |
+| GET | `/interview-sessions/{id}/code-submissions/{submission_id}/evaluation` | The final attempt's code-quality evaluation — `null` until `is_final=true` and grading has completed; always `null` for a non-final attempt | required |
 
-- `is_final: false` ("Run") — executes against sample test cases only, no LLM call, fast. Response never includes an `evaluation` block.
-- `is_final: true` ("Submit") — executes against **all** test cases (sample + hidden) and triggers the Evaluation Agent. A question can have at most one final attempt (`code_submissions` partial unique index on `(answer_id) WHERE is_final`); resubmitting after a final attempt is rejected with `409 SUBMISSION_ALREADY_FINALIZED`.
+Every call creates a new **attempt** (`attempt_no` assigned server-side); `is_final` distinguishes a "Run" from the one "Submit" that gets graded. Execution and (for a final attempt) LLM code-quality grading run in a background job (module §17 — never inline in the request), so **the POST response always reflects the pre-grading `queued` state, even though — under this project's synchronous test harness — the job may have already finished by the time the HTTP call returns.** A real client polls `GET .../code-submissions/{id}` for the graded result, same as `GET .../current-turn` polls text-round state.
 
-### `GET /code-submissions/{id}` — response shape
+- `is_final: false` ("Run") — executes against sample test cases only, no LLM call, fast.
+- `is_final: true` ("Submit") — executes against **all** test cases (sample + hidden) and, once execution succeeds, triggers code-quality evaluation. A question can have at most one final attempt (`code_submissions` partial unique index on `(answer_id) WHERE is_final`, the real backstop for a concurrent double-Submit — module §22); calling Submit again after a final attempt exists **replays that same submission** (same `id`, same `202`) rather than creating a second one or erroring — unless it's still mid-grading, which is a `409 FINAL_SUBMISSION_IN_PROGRESS`. Once a final submission genuinely finishes grading (a real verdict — success, partial, or one of the granular failure statuses below), the interview automatically advances to its next round; a Run never does.
+- `422 UNSUPPORTED_LANGUAGE` if `language` isn't one of the problem's `supported_languages` (Python, Java, C++ only for MVP — module §6's explicit instruction, a deliberate deviation from Features.md's stale "Python + JavaScript" MVP language list, corrected there too).
+
+### `GET /interview-sessions/{id}/code-submissions/{submission_id}` — response shape
 
 ```json
 {
   "id": "uuid",
+  "question_id": "uuid",
   "attempt_no": 3,
   "is_final": true,
-  "execution_status": "success",
+  "language": "python",
+  "execution_status": "partial",
   "passed_test_count": 8,
   "total_test_count": 10,
-  "test_results": [
-    { "sequence_no": 1, "passed": true, "runtime_ms": 12, "is_sample": true }
+  "total_runtime_ms": 94,
+  "error_message": null,
+  "sample_test_results": [
+    { "input": "4\n2 7 11 15\n9\n", "expected_output": "0 1", "actual_output": "0 1", "passed": true, "runtime_ms": 12, "stderr": null }
   ],
-  "evaluation": {
-    "coding": {
-      "correctness": { "score": 80, "explanation": "8/10 test cases passed; fails on empty-array edge case." },
-      "readability": { "score": 85, "explanation": "..." },
-      "optimization": { "score": 60, "explanation": "O(n²) approach; O(n log n) possible via sorting first." }
-    }
-  }
+  "created_at": "2026-01-01T00:00:00Z",
+  "graded_at": "2026-01-01T00:00:05Z"
 }
 ```
 
-`execution_status` progresses `queued → running → success|partial|error|timeout`. `evaluation` is only present when `is_final = true` and grading has completed. For non-final attempts, only sample (`is_sample = true`) test results are ever returned; a final attempt's response includes pass/fail + timing for hidden cases too, but never their input/expected output.
+`execution_status` progresses `queued → running →` one of `success | partial | compile_error | runtime_error | timeout | output_limit | error` (`error` is a genuine sandbox/provider infrastructure failure, never a candidate-code outcome — see Database.md §5's `code_submissions` note on when `is_final` gets released back to `false` for exactly this status). `sample_test_results` only ever itemizes the **sample** subset of whatever ran — for a Run, that's everything; for a Submit, hidden test outcomes are folded into `passed_test_count`/`total_test_count` only, never itemized individually (module §8).
+
+### `GET /interview-sessions/{id}/code-submissions/{submission_id}/evaluation` — response shape
+
+```json
+{
+  "correctness_score": 80.0,
+  "correctness_explanation": "8/10 test cases passed (weighted).",
+  "readability_score": 85.0,
+  "readability_explanation": "...",
+  "optimization_score": 60.0,
+  "optimization_explanation": "O(n²) approach; O(n log n) possible via sorting first.",
+  "edge_case_score": 70.0,
+  "edge_case_explanation": "...",
+  "time_complexity": "O(n²)",
+  "space_complexity": "O(1)",
+  "overall_code_score": 74.25,
+  "strengths": ["Clear variable names", "Handles the empty-input case explicitly"],
+  "weaknesses": ["Nested loop is more expensive than necessary"],
+  "recommendations": ["Sort first, then use two pointers for O(n log n)"]
+}
+```
+
+`correctness_score` and `overall_code_score` are both **computed, never LLM-guessed** (Database.md §6's `coding_evaluations` note); every other field is `CodeEvaluationProvider`'s judgment of qualities execution can't measure. No chain-of-thought ever appears here (module §20) — only scores, short evidence-citing explanations, and concrete, specific list items.
 
 ---
 

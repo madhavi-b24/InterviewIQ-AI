@@ -16,7 +16,12 @@ from sqlalchemy import text  # noqa: E402
 from app.api.deps import get_email_provider  # noqa: E402
 from app.cache.redis_client import get_redis_pool  # noqa: E402
 from app.db.session import get_engine, get_session_factory  # noqa: E402
+from app.execution.fake_executor import get_fake_code_executor  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services.code_evaluation.fake_provider import (  # noqa: E402
+    get_fake_code_evaluation_provider,
+)
+from app.services.coding.catalog_seed import seed_coding_catalog  # noqa: E402
 from app.services.email import EmailProvider  # noqa: E402
 from app.services.interview_intelligence.fake_provider import (  # noqa: E402
     get_fake_interview_agent_provider,
@@ -80,6 +85,11 @@ async def _clean_state_between_tests() -> AsyncGenerator[None]:
     # directly (not through app.dependency_overrides), so one test's
     # forced score/failure flags must never leak into the next.
     get_fake_interview_agent_provider().reset()
+    # Module 6 — same rationale again: the background execution job builds
+    # both of these itself (app/jobs/coding_execution.py), outside FastAPI's
+    # DI, so their fail/timeout/forced_* flags are reset here too.
+    get_fake_code_executor().reset()
+    get_fake_code_evaluation_provider().reset()
     yield
     await engine.dispose()
     await get_redis_pool().disconnect()
@@ -101,6 +111,17 @@ async def _seed_catalog() -> None:
     session_factory = get_session_factory()
     async with session_factory() as session:
         await seed_catalog(session)
+
+
+@pytest.fixture(autouse=True)
+async def _seed_coding_catalog() -> None:
+    """Module 6 — coding_problems/coding_problem_test_cases are shared
+    catalog data too (same reasoning as _seed_catalog above): not touched
+    by the users TRUNCATE, idempotent to reseed before every test.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        await seed_coding_catalog(session)
 
 
 @pytest.fixture

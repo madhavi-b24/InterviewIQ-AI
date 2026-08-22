@@ -1,0 +1,181 @@
+{
+  "_comment": "Module 6 — MVP coding-problem catalog. A small, high-quality set covering arrays/strings/hash maps/binary search/stacks-queues/trees/graphs/dynamic programming (module §8), not hundreds of generated ones. Every problem is stdin/stdout based (the sandbox runs a whole program, not a function call) — starter_code is I/O scaffolding only, never a working solution. app/services/coding/catalog_seed.py only reads this file; adding a problem is a data change, never a code change.",
+
+  "problems": [
+    {
+      "slug": "two-sum",
+      "title": "Two Sum",
+      "description": "Given an array of integers and a target value, return the 0-indexed positions of the two numbers that add up to target, in increasing order, separated by a space. Exactly one valid answer exists.\n\nInput:\n  n\n  a_1 a_2 ... a_n\n  target\nOutput:\n  i j   (0-indexed, i < j)",
+      "difficulty": "easy",
+      "topics": ["arrays", "hash_maps"],
+      "constraints": "2 <= n <= 10^4, -10^9 <= a_i, target <= 10^9",
+      "expected_time_complexity": "O(n)",
+      "expected_space_complexity": "O(n)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": [],
+      "starter_code": {
+        "python": "n = int(input())\narr = list(map(int, input().split()))\ntarget = int(input())\n# TODO: find the two indices whose values sum to target\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int n = Integer.parseInt(sc.nextLine().trim());\n        int[] arr = Arrays.stream(sc.nextLine().trim().split(\"\\\\s+\")).mapToInt(Integer::parseInt).toArray();\n        int target = Integer.parseInt(sc.nextLine().trim());\n        // TODO: find the two indices whose values sum to target\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    int n; cin >> n;\n    vector<long long> a(n);\n    for (auto &x : a) cin >> x;\n    long long target; cin >> target;\n    // TODO: find the two indices whose values sum to target\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "4\n2 7 11 15\n9\n", "expected_output": "0 1", "is_sample": true, "sequence_no": 1},
+        {"input": "3\n3 2 4\n6\n", "expected_output": "1 2", "is_sample": true, "sequence_no": 2},
+        {"input": "2\n3 3\n6\n", "expected_output": "0 1", "is_sample": false, "sequence_no": 3}
+      ]
+    },
+    {
+      "slug": "valid-parentheses",
+      "title": "Valid Parentheses",
+      "description": "Given a string containing only the characters ()[]{}, determine whether every bracket is closed by the correct matching type in the correct order.\n\nInput:\n  s\nOutput:\n  true or false",
+      "difficulty": "easy",
+      "topics": ["strings", "stacks_queues"],
+      "constraints": "1 <= |s| <= 10^4",
+      "expected_time_complexity": "O(n)",
+      "expected_space_complexity": "O(n)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": [],
+      "starter_code": {
+        "python": "s = input().strip()\n# TODO: determine if the brackets in s are balanced, print 'true' or 'false'\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        String s = sc.nextLine().trim();\n        // TODO: determine if the brackets in s are balanced, print \"true\" or \"false\"\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    string s; cin >> s;\n    // TODO: determine if the brackets in s are balanced, print \"true\" or \"false\"\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "()[]{}\n", "expected_output": "true", "is_sample": true, "sequence_no": 1},
+        {"input": "(]\n", "expected_output": "false", "is_sample": true, "sequence_no": 2},
+        {"input": "([)]\n", "expected_output": "false", "is_sample": false, "sequence_no": 3},
+        {"input": "{[]}\n", "expected_output": "true", "is_sample": false, "sequence_no": 4}
+      ]
+    },
+    {
+      "slug": "binary-search",
+      "title": "Binary Search",
+      "description": "Given a sorted (ascending) array of distinct integers and a target value, return the 0-indexed position of target, or -1 if it isn't present.\n\nInput:\n  n\n  a_1 ... a_n   (sorted ascending)\n  target\nOutput:\n  index or -1",
+      "difficulty": "easy",
+      "topics": ["binary_search", "arrays"],
+      "constraints": "1 <= n <= 10^4, array is sorted ascending with distinct values",
+      "expected_time_complexity": "O(log n)",
+      "expected_space_complexity": "O(1)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": [],
+      "starter_code": {
+        "python": "n = int(input())\narr = list(map(int, input().split()))\ntarget = int(input())\n# TODO: binary search for target, print its index or -1\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int n = Integer.parseInt(sc.nextLine().trim());\n        int[] arr = Arrays.stream(sc.nextLine().trim().split(\"\\\\s+\")).mapToInt(Integer::parseInt).toArray();\n        int target = Integer.parseInt(sc.nextLine().trim());\n        // TODO: binary search for target, print its index or -1\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    int n; cin >> n;\n    vector<long long> a(n);\n    for (auto &x : a) cin >> x;\n    long long target; cin >> target;\n    // TODO: binary search for target, print its index or -1\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "6\n-1 0 3 5 9 12\n9\n", "expected_output": "4", "is_sample": true, "sequence_no": 1},
+        {"input": "6\n-1 0 3 5 9 12\n2\n", "expected_output": "-1", "is_sample": true, "sequence_no": 2},
+        {"input": "1\n5\n5\n", "expected_output": "0", "is_sample": false, "sequence_no": 3}
+      ]
+    },
+    {
+      "slug": "valid-anagram",
+      "title": "Valid Anagram",
+      "description": "Given two strings s and t, determine whether t is an anagram of s (same letters, same multiplicity, any order).\n\nInput:\n  s\n  t\nOutput:\n  true or false",
+      "difficulty": "easy",
+      "topics": ["strings", "hash_maps"],
+      "constraints": "1 <= |s|, |t| <= 5*10^4, lowercase English letters only",
+      "expected_time_complexity": "O(n)",
+      "expected_space_complexity": "O(1) (bounded alphabet)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": [],
+      "starter_code": {
+        "python": "s = input().strip()\nt = input().strip()\n# TODO: determine if t is an anagram of s, print 'true' or 'false'\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        String s = sc.nextLine().trim();\n        String t = sc.nextLine().trim();\n        // TODO: determine if t is an anagram of s, print \"true\" or \"false\"\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    string s, t; cin >> s >> t;\n    // TODO: determine if t is an anagram of s, print \"true\" or \"false\"\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "anagram\nnagaram\n", "expected_output": "true", "is_sample": true, "sequence_no": 1},
+        {"input": "rat\ncar\n", "expected_output": "false", "is_sample": true, "sequence_no": 2},
+        {"input": "a\nab\n", "expected_output": "false", "is_sample": false, "sequence_no": 3}
+      ]
+    },
+    {
+      "slug": "max-subarray",
+      "title": "Maximum Subarray Sum",
+      "description": "Given an array of integers (which may include negatives), find the largest possible sum of a contiguous, non-empty subarray.\n\nInput:\n  n\n  a_1 ... a_n\nOutput:\n  the maximum subarray sum",
+      "difficulty": "medium",
+      "topics": ["arrays", "dynamic_programming"],
+      "constraints": "1 <= n <= 10^5, -10^4 <= a_i <= 10^4",
+      "expected_time_complexity": "O(n)",
+      "expected_space_complexity": "O(1)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": ["software_engineer", "backend_engineer", "ai_engineer", "ml_engineer", "data_engineer"],
+      "starter_code": {
+        "python": "n = int(input())\narr = list(map(int, input().split()))\n# TODO: Kadane's algorithm — print the maximum subarray sum\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int n = Integer.parseInt(sc.nextLine().trim());\n        int[] arr = Arrays.stream(sc.nextLine().trim().split(\"\\\\s+\")).mapToInt(Integer::parseInt).toArray();\n        // TODO: Kadane's algorithm — print the maximum subarray sum\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    int n; cin >> n;\n    vector<long long> a(n);\n    for (auto &x : a) cin >> x;\n    // TODO: Kadane's algorithm — print the maximum subarray sum\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "9\n-2 1 -3 4 -1 2 1 -5 4\n", "expected_output": "6", "is_sample": true, "sequence_no": 1},
+        {"input": "1\n1\n", "expected_output": "1", "is_sample": true, "sequence_no": 2},
+        {"input": "5\n5 4 -1 7 8\n", "expected_output": "23", "is_sample": false, "sequence_no": 3}
+      ]
+    },
+    {
+      "slug": "binary-tree-max-level-sum",
+      "title": "Maximum Level Sum in a Binary Tree",
+      "description": "A binary tree is given as an explicit node array: each node has a value and the indices of its left/right children (-1 if none). Find the maximum sum of node values across any single level (root is level 1).\n\nInput:\n  n\n  val_0 left_0 right_0\n  ...\n  val_{n-1} left_{n-1} right_{n-1}\n  root_index\nOutput:\n  the maximum level sum",
+      "difficulty": "medium",
+      "topics": ["trees"],
+      "constraints": "1 <= n <= 10^4",
+      "expected_time_complexity": "O(n)",
+      "expected_space_complexity": "O(n)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": ["software_engineer", "backend_engineer"],
+      "starter_code": {
+        "python": "n = int(input())\nnodes = [tuple(map(int, input().split())) for _ in range(n)]\nroot = int(input())\n# TODO: BFS level by level, print the maximum level sum\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        int n = Integer.parseInt(sc.nextLine().trim());\n        int[][] nodes = new int[n][3];\n        for (int i = 0; i < n; i++) {\n            String[] parts = sc.nextLine().trim().split(\"\\\\s+\");\n            for (int j = 0; j < 3; j++) nodes[i][j] = Integer.parseInt(parts[j]);\n        }\n        int root = Integer.parseInt(sc.nextLine().trim());\n        // TODO: BFS level by level, print the maximum level sum\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    int n; cin >> n;\n    vector<array<long long,3>> nodes(n);\n    for (auto &node : nodes) cin >> node[0] >> node[1] >> node[2];\n    int root; cin >> root;\n    // TODO: BFS level by level, print the maximum level sum\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "5\n1 1 2\n7 3 4\n0 -1 -1\n7 -1 -1\n-8 -1 -1\n0\n", "expected_output": "7", "is_sample": true, "sequence_no": 1},
+        {"input": "1\n5 -1 -1\n0\n", "expected_output": "5", "is_sample": false, "sequence_no": 2}
+      ]
+    },
+    {
+      "slug": "number-of-islands",
+      "title": "Number of Islands",
+      "description": "Given a grid of '0' (water) and '1' (land), count the number of islands — maximal groups of '1's connected horizontally or vertically.\n\nInput:\n  R C\n  R lines, each a string of C characters ('0'/'1')\nOutput:\n  the number of islands",
+      "difficulty": "medium",
+      "topics": ["graphs"],
+      "constraints": "1 <= R, C <= 300",
+      "expected_time_complexity": "O(R*C)",
+      "expected_space_complexity": "O(R*C)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": ["software_engineer", "backend_engineer", "ai_engineer", "ml_engineer", "data_engineer"],
+      "starter_code": {
+        "python": "r, c = map(int, input().split())\ngrid = [input().strip() for _ in range(r)]\n# TODO: count connected components of '1' cells (4-directional), print the count\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        String[] first = sc.nextLine().trim().split(\"\\\\s+\");\n        int r = Integer.parseInt(first[0]), c = Integer.parseInt(first[1]);\n        String[] grid = new String[r];\n        for (int i = 0; i < r; i++) grid[i] = sc.nextLine();\n        // TODO: count connected components of '1' cells (4-directional), print the count\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    int r, c; cin >> r >> c;\n    vector<string> grid(r);\n    for (auto &row : grid) cin >> row;\n    // TODO: count connected components of '1' cells (4-directional), print the count\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "4 5\n11000\n11000\n00100\n00011\n", "expected_output": "3", "is_sample": true, "sequence_no": 1},
+        {"input": "1 1\n1\n", "expected_output": "1", "is_sample": false, "sequence_no": 2}
+      ]
+    },
+    {
+      "slug": "longest-common-subsequence",
+      "title": "Longest Common Subsequence",
+      "description": "Given two strings, find the length of their longest common subsequence (not necessarily contiguous, order preserved).\n\nInput:\n  s1\n  s2\nOutput:\n  the LCS length",
+      "difficulty": "hard",
+      "topics": ["dynamic_programming", "strings"],
+      "constraints": "1 <= |s1|, |s2| <= 1000",
+      "expected_time_complexity": "O(n*m)",
+      "expected_space_complexity": "O(n*m)",
+      "supported_languages": ["python", "java", "cpp"],
+      "role_keys": ["software_engineer", "backend_engineer", "ai_engineer", "ml_engineer"],
+      "starter_code": {
+        "python": "s1 = input().strip()\ns2 = input().strip()\n# TODO: classic DP — print the length of the longest common subsequence\n",
+        "java": "import java.util.*;\npublic class Solution {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n        String s1 = sc.nextLine().trim();\n        String s2 = sc.nextLine().trim();\n        // TODO: classic DP — print the length of the longest common subsequence\n    }\n}\n",
+        "cpp": "#include <bits/stdc++.h>\nusing namespace std;\nint main() {\n    string s1, s2; cin >> s1 >> s2;\n    // TODO: classic DP — print the length of the longest common subsequence\n    return 0;\n}\n"
+      },
+      "test_cases": [
+        {"input": "abcde\nace\n", "expected_output": "3", "is_sample": true, "sequence_no": 1},
+        {"input": "abc\nabc\n", "expected_output": "3", "is_sample": true, "sequence_no": 2},
+        {"input": "abc\ndef\n", "expected_output": "0", "is_sample": false, "sequence_no": 3}
+      ]
+    }
+  ]
+}

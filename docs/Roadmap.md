@@ -75,13 +75,14 @@ We build exactly one module at a time. Each module below has an explicit exit cr
 
 **Scope:** [Features.md](Features.md) §6, plus the coding portion of §4/§7.
 
-- `CodeExecutor` protocol + `DockerSandboxExecutor` implementation with the security controls from Architecture.md §6
-- `question_test_cases`, `code_submissions`, `code_submission_test_results` wired
-- Async submit → job → grade → poll flow from API.md §5
-- Evaluation Agent's coding path: computed correctness + LLM readability/optimization
-- Start with Python + JavaScript only (per Features.md §6)
+- `CodeExecutor` protocol + `DockerSandboxExecutor` implementation with the security controls from Architecture.md §6 — resolved as a dedicated sibling `executor` container (never a Docker-socket mount), layered isolation (network/container/process), verified against the real running container in `tests/test_sandbox_security.py`
+- `coding_problems`/`coding_problem_test_cases` catalog (new, seed-driven) + `question_test_cases`, `code_submissions`, `code_submission_test_results` wired; `questions`/`code_submissions`/`coding_evaluations` extended additively
+- Async submit → job → grade → poll flow from API.md §5, plus a dedicated coding-problem retrieval endpoint
+- Coding-round selection and round-advancement wired into the same LangGraph engine (new `select_coding_problem_node`, `CODING_ROUND_COMPLETE` trigger); Run/Submit themselves stay outside the graph as plain `CodingRoundService` calls
+- Evaluation's coding path: computed correctness + deterministic `overall_code_score`, LLM readability/optimization/edge-case judgment (`CodeEvaluationProvider`)
+- **Python, Java, C++** — a deliberate deviation from this document's and Features.md's earlier "start with Python + JavaScript" language, per this module's explicit task instruction; corrected in both documents rather than left stale
 
-**Exit criteria:** a candidate can submit real code for a coding question, see it actually execute against sample + hidden test cases in an isolated sandbox, and get back a correctness score that is demonstrably tied to test results (not just plausible-sounding LLM text) plus readability/optimization feedback.
+**Exit criteria:** a candidate can submit real code for a coding question, see it actually execute against sample + hidden test cases in an isolated sandbox, and get back a correctness score that is demonstrably tied to test results (not just plausible-sounding LLM text) plus readability/optimization/edge-case feedback. See backend/README.md's "Coding Round & Code Execution (Module 6)" section for the full writeup, including what was and wasn't live-verified.
 
 ---
 

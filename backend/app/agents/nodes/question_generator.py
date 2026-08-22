@@ -63,6 +63,7 @@ def make_question_generator_node(
             "round_type": state["current_round"],
             "difficulty": state["current_difficulty"],
             "parent_question_id": None,
+            "coding_problem_id": None,  # this node never handles coding rounds (module §8)
         }
         return {"current_question": question_ref, "resume_evidence_context": evidence}
 

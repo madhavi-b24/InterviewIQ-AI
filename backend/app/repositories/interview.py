@@ -19,7 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.models.enums import RoundStatus
-from app.models.interview import Answer, InterviewRound, InterviewSession, Question
+from app.models.interview import (
+    Answer,
+    InterviewRound,
+    InterviewSession,
+    Question,
+    QuestionTestCase,
+)
 from app.repositories.base import BaseRepository
 
 
@@ -104,16 +110,60 @@ class QuestionRepository(BaseRepository[Question]):
         return list(result.scalars().all())
 
     async def get_with_round(self, question_id: uuid.UUID) -> Question | None:
-        """Eager-loads `round` explicitly — never relies on SQLAlchemy's
-        lazy-load identity-map optimization for a many-to-one relationship
-        being safe in an async session (module §5 API responses read
-        `question.round.round_type`).
+        """Eager-loads `round` and `test_cases` explicitly — never relies
+        on SQLAlchemy's lazy-load identity-map optimization for a
+        relationship access being safe in an async session (module §5 API
+        responses read `question.round.round_type`; module §6's coding
+        endpoints read `question.test_cases` to shape a CodingProblemOut —
+        empty and harmless to eager-load for every non-coding question).
         """
         stmt = (
-            select(Question).where(Question.id == question_id).options(selectinload(Question.round))
+            select(Question)
+            .where(Question.id == question_id)
+            .options(selectinload(Question.round), selectinload(Question.test_cases))
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_coding_problem_ids_for_session(self, session_id: uuid.UUID) -> list[uuid.UUID]:
+        """Module 6 — every catalog problem id already used by a coding
+        question anywhere in this interview (joins through
+        InterviewRound, since Question has no direct session_id column).
+        Feeds `coding_problem_history` in graph state so
+        select_coding_problem avoids repeating a problem across multiple
+        coding rounds in the same plan (app/agents/policy.py).
+        """
+        stmt = (
+            select(Question.coding_problem_id)
+            .join(InterviewRound, Question.round_id == InterviewRound.id)
+            .where(
+                InterviewRound.session_id == session_id,
+                Question.coding_problem_id.isnot(None),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class QuestionTestCaseRepository(BaseRepository[QuestionTestCase]):
+    """Module 6 — the LIVE (snapshotted) test cases attached to a coding
+    Question, distinct from CodingProblemTestCase (the catalog's own,
+    mutable copy — app/repositories/coding.py). Never exposed via any API
+    response for non-sample rows (module §8) — callers of `list_for_question`
+    are the sandbox-execution path and the (ownership-checked) sample-only
+    schema mapper, never a raw passthrough.
+    """
+
+    model = QuestionTestCase
+
+    async def list_for_question(self, question_id: uuid.UUID) -> list[QuestionTestCase]:
+        stmt = (
+            select(QuestionTestCase)
+            .where(QuestionTestCase.question_id == question_id)
+            .order_by(QuestionTestCase.sequence_no)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
 
 
 class AnswerRepository(BaseRepository[Answer]):

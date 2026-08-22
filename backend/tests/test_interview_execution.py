@@ -203,7 +203,15 @@ async def test_unauthorized_user_cannot_start_others_interview(client: AsyncClie
     assert response.status_code == 404
 
 
-async def test_all_coding_plan_rejected_at_start(client: AsyncClient) -> None:
+async def test_all_coding_plan_starts_with_a_coding_question(client: AsyncClient) -> None:
+    """Module 6 — supersedes Module 5's test_all_coding_plan_rejected_at_start:
+    a plan whose only round is `coding` used to be rejected at start
+    (ALL_ROUNDS_UNSUPPORTED, a Module 5 placeholder — coding execution
+    wasn't built yet). Coding rounds are real now, so this plan starts
+    successfully and its first (only) question is a coding question. Full
+    Run/Submit-through-completion coverage lives in tests/test_coding_round.py;
+    this test only proves start_interview's own round-type routing decision.
+    """
     token = await _register(client, email="start4@example.com")
     role = await _find_role(client, token, role_key="software_engineer", company_id=None)
     template = await _find_template(client, token, role_id=role["id"], name="Coding Practice")
@@ -214,8 +222,12 @@ async def test_all_coding_plan_rejected_at_start(client: AsyncClient) -> None:
     )
 
     response = await _start(client, token, interview["id"])
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "ALL_ROUNDS_UNSUPPORTED"
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["current_round"] == "coding"
+    assert body["question"]["round_type"] == "coding"
+    assert body["question"]["parent_question_id"] is None
+    assert body["question"]["question_text"]  # the problem's description, never blank
 
 
 # ===========================================================================
@@ -503,7 +515,16 @@ async def test_rounds_transition_in_order_and_reach_completed(client: AsyncClien
     assert detail.json()["status"] == "completed"
 
 
-async def test_coding_round_is_skipped_not_faked(client: AsyncClient) -> None:
+async def test_coding_round_in_mixed_plan_is_reached_not_skipped(client: AsyncClient) -> None:
+    """Module 6 — supersedes Module 5's test_coding_round_is_skipped_not_faked:
+    "Technical Mock" is introduction -> technical(x3) -> coding. Answering
+    through the first two rounds must land on a real coding QUESTION, not
+    an immediate session_complete with the coding round silently marked
+    SKIPPED (Module 5's placeholder behavior). Actually driving that
+    coding question through Run/Submit to completion is
+    tests/test_coding_round.py's job — this test only proves the round
+    -transition routing decision.
+    """
     token = await _register(client, email="rounds2@example.com")
     role = await _find_role(client, token, role_key="backend_engineer", company_id=None)
     template = await _find_template(client, token, role_id=role["id"], name="Technical Mock")
@@ -518,24 +539,23 @@ async def test_coding_round_is_skipped_not_faked(client: AsyncClient) -> None:
     provider = get_fake_interview_agent_provider()
     provider.forced_follow_up_worthy = False
 
-    # introduction (1) + technical (3) = 4 answers to exhaust every
-    # non-coding round in this template; the coding round must be skipped,
-    # never executed/faked.
+    # introduction (1) + technical (3) = 4 answers exhausts both non-coding
+    # rounds; the 4th answer's `next` must be the coding round's question.
+    response = None
     for _ in range(4):
         response = await _answer(client, token, interview["id"], question_id, "a reasonable answer")
         assert response.status_code == 200, response.text
-        if response.json()["next"]["type"] == "session_complete":
-            break
+        assert response.json()["next"]["type"] == "question"
         question_id = response.json()["next"]["question"]["id"]
 
-    assert response.json()["next"]["type"] == "session_complete"
+    assert response.json()["next"]["question"]["round_type"] == "coding"
 
     async with get_session_factory()() as session:
         result = await session.execute(
             select(InterviewRound).where(InterviewRound.session_id == uuid.UUID(interview["id"]))
         )
         rounds_by_type = {r.round_type.value: r.status.value for r in result.scalars().all()}
-        assert rounds_by_type["coding"] == "skipped"
+        assert rounds_by_type["coding"] == "active"  # reached, not skipped
         assert rounds_by_type["introduction"] == "completed"
         assert rounds_by_type["technical"] == "completed"
 

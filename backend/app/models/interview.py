@@ -189,6 +189,26 @@ class Question(Base, UUIDPrimaryKeyMixin):
     parent_question_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("questions.id", ondelete="SET NULL"), nullable=True
     )
+    # Module 6 — set only when question_type=coding. RESTRICT (mirrors
+    # interview_rounds.template_round_id): a catalog problem that's already
+    # been asked in a live interview can be deactivated but never deleted
+    # out from under that history. NULL for every non-coding question.
+    coding_problem_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("coding_problems.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    # Module 6 — the catalog problem's full content (constraints,
+    # expected complexity, per-language starter code, supported languages)
+    # SNAPSHOTTED at selection time — never re-read live from
+    # coding_problems, so an interview already in progress is unaffected
+    # by a later catalog edit (the same "catalog is mutable, live instances
+    # are immutable copies" rule Module 4's plan_snapshot established).
+    # question_text carries the problem description itself (consistent
+    # with every other question_type); this column carries everything
+    # else. NULL for every non-coding question.
+    coding_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     round: Mapped["InterviewRound"] = relationship(back_populates="questions")
     test_cases: Mapped[list["QuestionTestCase"]] = relationship(
@@ -269,6 +289,11 @@ class CodeSubmission(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     total_runtime_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     peak_memory_kb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     graded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Module 6 — populated only for COMPILE_ERROR (the compiler's own
+    # message) or a genuine sandbox/provider infra failure; NULL for every
+    # other outcome (per-test stderr already covers wrong-answer/runtime
+    # cases — see app/schemas/coding.py's CodeSubmissionOut docstring).
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     answer: Mapped["Answer"] = relationship(back_populates="code_submissions")
     test_results: Mapped[list["CodeSubmissionTestResult"]] = relationship(
@@ -298,3 +323,11 @@ class CodeSubmissionTestResult(Base, UUIDPrimaryKeyMixin):
     stderr: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     code_submission: Mapped["CodeSubmission"] = relationship(back_populates="test_results")
+    # Module 6 — one-directional (QuestionTestCase doesn't need to
+    # enumerate every result referencing it): lets the API layer show the
+    # sample test's own input/expected_output alongside the candidate's
+    # actual_output, without a second round-trip query. Only ever
+    # dereferenced for is_sample=True rows (module §8) — the caller filters
+    # before rendering, this relationship itself carries no such
+    # restriction (RESTRICT means the target row always exists).
+    test_case: Mapped["QuestionTestCase"] = relationship()

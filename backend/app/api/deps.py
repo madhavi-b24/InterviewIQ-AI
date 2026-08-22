@@ -19,12 +19,15 @@ from app.core.exceptions import ForbiddenError, ServiceUnavailableError, Unautho
 from app.core.security import InvalidTokenError, TokenType, decode_token
 from app.db.session import get_db_session
 from app.execution.base import CodeExecutor
-from app.execution.docker_sandbox import DockerSandboxExecutor
+from app.execution.factories import build_code_executor
 from app.jobs.background_tasks_runner import BackgroundTasksRunner
 from app.jobs.base import JobRunner
 from app.models.enums import UserRole
 from app.models.user import User
 from app.services.auth_service import AuthService
+from app.services.code_evaluation.factories import build_code_evaluation_provider
+from app.services.code_evaluation.provider import CodeEvaluationProvider
+from app.services.coding.coding_round_service import CodingRoundService
 from app.services.email import ConsoleEmailProvider, EmailProvider
 from app.services.interview.execution_service import InterviewExecutionService
 from app.services.interview_intelligence.factories import build_interview_agent_provider
@@ -55,11 +58,24 @@ JobRunnerDep = Annotated[JobRunner, Depends(get_job_runner)]
 
 
 def get_code_executor(settings: AppSettings) -> CodeExecutor:
-    if settings.CODE_EXECUTION_BACKEND == "docker_sandbox":
-        return DockerSandboxExecutor()
-    raise NotImplementedError(
-        f"code execution backend {settings.CODE_EXECUTION_BACKEND!r} not wired yet"
-    )
+    return build_code_executor(settings)
+
+
+CodeExecutorDep = Annotated[CodeExecutor, Depends(get_code_executor)]
+
+
+def get_code_evaluation_provider(settings: AppSettings) -> CodeEvaluationProvider:
+    return build_code_evaluation_provider(settings)
+
+
+CodeEvaluationProviderDep = Annotated[CodeEvaluationProvider, Depends(get_code_evaluation_provider)]
+
+
+def get_coding_round_service(session: DbSession) -> CodingRoundService:
+    return CodingRoundService(session)
+
+
+CodingRoundServiceDep = Annotated[CodingRoundService, Depends(get_coding_round_service)]
 
 
 async def _bearer_token(authorization: str | None) -> str:

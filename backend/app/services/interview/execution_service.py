@@ -39,6 +39,7 @@ from app.agents.checkpointer import get_checkpointer
 from app.agents.graph import build_interview_graph
 from app.agents.state import (
     AnswerRef,
+    CodingProblemCandidate,
     InterviewScores,
     InterviewState,
     PersonalizationContextState,
@@ -51,6 +52,7 @@ from app.core.exceptions import (
     UnprocessableEntityError,
 )
 from app.core.logging import get_logger
+from app.models.coding import CodingProblem
 from app.models.enums import (
     DifficultyLevel,
     DifficultySignal,
@@ -61,7 +63,14 @@ from app.models.enums import (
     SessionStatus,
 )
 from app.models.evaluation import AnswerEvaluation
-from app.models.interview import Answer, InterviewRound, InterviewSession, Question
+from app.models.interview import (
+    Answer,
+    InterviewRound,
+    InterviewSession,
+    Question,
+    QuestionTestCase,
+)
+from app.repositories.coding import CodingProblemRepository
 from app.repositories.evaluation import AnswerEvaluationRepository
 from app.repositories.interview import (
     AnswerRepository,
@@ -91,6 +100,7 @@ class InterviewExecutionService:
         self._questions = QuestionRepository(session)
         self._answers = AnswerRepository(session)
         self._evaluations = AnswerEvaluationRepository(session)
+        self._coding_problems = CodingProblemRepository(session)
 
     # --- Reads ---------------------------------------------------------------
 
@@ -129,9 +139,8 @@ class InterviewExecutionService:
         first_index = _first_executable_round_index(context.rounds)
         if first_index is None:
             raise UnprocessableEntityError(
-                "this interview's plan consists entirely of coding rounds, which the "
-                "interview engine does not support yet",
-                code="ALL_ROUNDS_UNSUPPORTED",
+                "this interview's plan has no rounds — nothing to execute",
+                code="EMPTY_ROUND_PLAN",
             )
 
         round_ = await self._rounds.get_by_sequence(interview.id, first_index)
@@ -146,11 +155,13 @@ class InterviewExecutionService:
                     await self._rounds.mark_status(leading, RoundStatus.SKIPPED)
 
         personalization_state = _personalization_to_state(context.personalization)
+        coding_candidates = await self._coding_candidates()
         state: InterviewState = {
             "interview_id": str(interview.id),
             "user_id": str(user_id),
             "company": context.company_name,
             "role": context.role_title,
+            "role_key": context.role_key,
             "mode": context.mode.value,
             "round_plan": [_round_plan_to_dict(r) for r in context.rounds],
             "current_round": round_.round_type.value,
@@ -173,8 +184,9 @@ class InterviewExecutionService:
             "trigger": "START",
             "next_action": None,
             "interview_status": interview.status.value,
-            "rounds_to_skip": [],
             "knowledge_context": "",
+            "coding_problem_candidates": coding_candidates,
+            "coding_problem_history": [],  # nothing asked yet — this is the first round
         }
 
         thread_id = f"interview:{interview.id}:{uuid.uuid4().hex}"
@@ -343,12 +355,15 @@ class InterviewExecutionService:
 
         all_evaluations = await self._evaluations.list_for_session(interview.id)
         personalization_state = _personalization_to_state(context.personalization)
+        coding_candidates = await self._coding_candidates()
+        coding_history = await self._questions.list_coding_problem_ids_for_session(interview.id)
 
         state: InterviewState = {
             "interview_id": str(interview.id),
             "user_id": str(user_id),
             "company": context.company_name,
             "role": context.role_title,
+            "role_key": context.role_key,
             "mode": context.mode.value,
             "round_plan": [_round_plan_to_dict(r) for r in context.rounds],
             "current_round": round_.round_type.value,
@@ -373,8 +388,9 @@ class InterviewExecutionService:
             "trigger": "SUBMIT_ANSWER",
             "next_action": None,
             "interview_status": interview.status.value,
-            "rounds_to_skip": [],
             "knowledge_context": "",
+            "coding_problem_candidates": coding_candidates,
+            "coding_problem_history": [str(i) for i in coding_history],
         }
 
         result = await self._invoke_graph(provider, interview.langgraph_thread_id, state)
@@ -397,38 +413,7 @@ class InterviewExecutionService:
 
         interview.current_difficulty = DifficultyLevel(result["current_difficulty"])
 
-        for seq in result.get("rounds_to_skip", []):
-            skipped_round = await self._rounds.get_by_sequence(interview.id, seq)
-            if skipped_round is not None:
-                await self._rounds.mark_status(skipped_round, RoundStatus.SKIPPED)
-
-        now = datetime.now(UTC)
-        round_changed = result["current_round_index"] != round_.sequence_no
-        if round_changed or result["interview_status"] == "completed":
-            await self._rounds.mark_status(round_, RoundStatus.COMPLETED, completed_at=now)
-
-        next_question: Question | None = None
-        if result["interview_status"] == "completed":
-            interview.status = SessionStatus.COMPLETED
-            interview.completed_at = now
-            interview.current_question_id = None
-            interview.current_round_sequence = result["current_round_index"]
-        else:
-            target_round = round_
-            if round_changed:
-                target_round = await self._rounds.get_by_sequence(
-                    interview.id, result["current_round_index"]
-                )
-                if target_round is None:
-                    raise UnprocessableEntityError("target round not found", code="ROUND_NOT_FOUND")
-                await self._rounds.mark_status(target_round, RoundStatus.ACTIVE, started_at=now)
-                interview.current_round_sequence = result["current_round_index"]
-
-            next_question = await self._persist_question(result, target_round)
-            interview.current_question_id = next_question.id
-
-        await self._session.commit()
-        await self._session.refresh(interview, attribute_names=["rounds"])
+        next_question = await self._apply_round_transition_result(result, round_, interview)
         logger.info(
             "interview.answer.processed",
             interview_id=str(interview_id),
@@ -438,6 +423,109 @@ class InterviewExecutionService:
             status=interview.status.value,
         )
         return interview, evaluation_dict, previous_difficulty, next_question
+
+    # --- Coding round completion (Module 6) -----------------------------
+
+    async def complete_coding_round(
+        self,
+        *,
+        interview_id: uuid.UUID,
+        user_id: uuid.UUID,
+        question_id: uuid.UUID,
+        provider: InterviewAgentProvider,
+    ) -> tuple[InterviewSession, Question | None]:
+        """Called once a *final* code submission has been executed and
+        graded by CodingRoundService (module §9 — Run/Submit never touch
+        the graph themselves). Advances the interview exactly the way
+        submit_answer's NEXT_ROUND path does, via the CODING_ROUND_COMPLETE
+        trigger, which routes straight to round_transition — no
+        evaluate_answer/adapt_difficulty for a round with no free-text
+        answer or difficulty signal.
+
+        Idempotency (module §22): keyed on the round's own status rather
+        than an evaluation row (there is none here) — a round already
+        RoundStatus.COMPLETED means a previous call already advanced the
+        interview, so this replays the interview's CURRENT state rather
+        than re-invoking the graph a second time.
+        """
+        interview = await self._interviews.get_owned_for_update(interview_id, user_id)
+        if interview is None:
+            raise NotFoundError("interview not found", code="INTERVIEW_NOT_FOUND")
+
+        question = await self._questions.get_with_round(question_id)
+        if question is None:
+            raise NotFoundError("question not found", code="QUESTION_NOT_FOUND")
+        round_ = question.round
+
+        if round_.status == RoundStatus.COMPLETED:
+            logger.info(
+                "interview.coding_round.idempotent_replay",
+                interview_id=str(interview_id),
+                question_id=str(question_id),
+            )
+            next_question = (
+                await self._questions.get_with_round(interview.current_question_id)
+                if interview.current_question_id
+                else None
+            )
+            return interview, next_question
+
+        if interview.status != SessionStatus.IN_PROGRESS:
+            raise ConflictError("interview is not in progress", code="INTERVIEW_NOT_IN_PROGRESS")
+        if interview.current_question_id != question_id:
+            raise ConflictError(
+                "question_id does not match this interview's current pending question",
+                code="STALE_QUESTION_ID",
+            )
+
+        context = build_execution_context(interview)
+        personalization_state = _personalization_to_state(context.personalization)
+        coding_candidates = await self._coding_candidates()
+        coding_history = await self._questions.list_coding_problem_ids_for_session(interview.id)
+        all_evaluations = await self._evaluations.list_for_session(interview.id)
+
+        state: InterviewState = {
+            "interview_id": str(interview.id),
+            "user_id": str(user_id),
+            "company": context.company_name,
+            "role": context.role_title,
+            "role_key": context.role_key,
+            "mode": context.mode.value,
+            "round_plan": [_round_plan_to_dict(r) for r in context.rounds],
+            "current_round": round_.round_type.value,
+            "current_round_index": round_.sequence_no,
+            "current_question": None,
+            "current_difficulty": interview.current_difficulty.value,
+            "previous_difficulty": interview.current_difficulty.value,
+            "last_question": None,
+            "last_answer": None,
+            "question_history": [],
+            "answer_history": [],
+            "technical_evaluation": None,
+            "communication_evaluation": None,
+            "evaluation": None,
+            "follow_up_count": 0,
+            "round_score": None,
+            "interview_scores": _compute_interview_scores(all_evaluations),
+            "personalization_context": personalization_state,
+            "resume_evidence_context": [],
+            "trigger": "CODING_ROUND_COMPLETE",
+            "next_action": None,
+            "interview_status": interview.status.value,
+            "knowledge_context": "",
+            "coding_problem_candidates": coding_candidates,
+            "coding_problem_history": [str(i) for i in coding_history],
+        }
+
+        result = await self._invoke_graph(provider, interview.langgraph_thread_id, state)
+        next_question = await self._apply_round_transition_result(result, round_, interview)
+        logger.info(
+            "interview.coding_round.completed",
+            interview_id=str(interview_id),
+            question_id=str(question_id),
+            status=interview.status.value,
+        )
+        return interview, next_question
 
     # --- Abandon -----------------------------------------------------------
 
@@ -476,8 +564,60 @@ class InterviewExecutionService:
                 code="INTERVIEW_ENGINE_UNAVAILABLE",
             ) from exc
 
+    async def _apply_round_transition_result(
+        self, result: dict, round_: InterviewRound, interview: InterviewSession
+    ) -> Question | None:
+        """The shared tail every trigger that can advance a round needs
+        after invoking the graph (module §6: factored out rather than
+        duplicated) — submit_answer's NEXT_ROUND path and
+        complete_coding_round both call this. Marks the just-finished
+        round COMPLETED, marks a new target round ACTIVE if the graph
+        advanced to one, persists the next question (text or coding), and
+        marks the interview COMPLETED if the graph decided there's nothing
+        left. Commits once at the end.
+        """
+        now = datetime.now(UTC)
+        round_changed = result["current_round_index"] != round_.sequence_no
+        if round_changed or result["interview_status"] == "completed":
+            await self._rounds.mark_status(round_, RoundStatus.COMPLETED, completed_at=now)
+
+        next_question: Question | None = None
+        if result["interview_status"] == "completed":
+            interview.status = SessionStatus.COMPLETED
+            interview.completed_at = now
+            interview.current_question_id = None
+            interview.current_round_sequence = result["current_round_index"]
+        else:
+            target_round = round_
+            if round_changed:
+                target_round = await self._rounds.get_by_sequence(
+                    interview.id, result["current_round_index"]
+                )
+                if target_round is None:
+                    raise UnprocessableEntityError("target round not found", code="ROUND_NOT_FOUND")
+                await self._rounds.mark_status(target_round, RoundStatus.ACTIVE, started_at=now)
+                interview.current_round_sequence = result["current_round_index"]
+
+            next_question = await self._persist_question(result, target_round)
+            interview.current_question_id = next_question.id
+
+        await self._session.commit()
+        await self._session.refresh(interview, attribute_names=["rounds"])
+        return next_question
+
+    async def _coding_candidates(self) -> list[CodingProblemCandidate]:
+        """Every active catalog problem, shaped for graph state — see
+        app/agents/state.py's CodingProblemCandidate docstring for why
+        test case data is deliberately excluded.
+        """
+        problems = await self._coding_problems.list_active_for_selection()
+        return [_coding_problem_to_candidate(p) for p in problems]
+
     async def _persist_question(self, result_state: dict, round_: InterviewRound) -> Question:
         ref: QuestionRef = result_state["current_question"]
+        if ref["round_type"] == RoundType.CODING.value:
+            return await self._persist_coding_question(ref, round_)
+
         question_type = (
             QuestionType.SYSTEM_DESIGN
             if ref["round_type"] == RoundType.SYSTEM_DESIGN.value
@@ -505,15 +645,74 @@ class InterviewExecutionService:
         await self._questions.add(question)
         return question
 
+    async def _persist_coding_question(self, ref: QuestionRef, round_: InterviewRound) -> Question:
+        """Module 6 — snapshots the selected catalog CodingProblem into a
+        live Question (question_text carries the description, same as
+        every other question_type) plus one QuestionTestCase per catalog
+        test case (module §8's catalog-is-mutable/instance-is-immutable
+        rule — see app/models/interview.py's Question docstring and
+        app/models/coding.py's module docstring for the full reasoning).
+        """
+        if not ref["coding_problem_id"]:
+            raise UnprocessableEntityError(
+                "select_coding_problem_node returned a coding question ref with no "
+                "coding_problem_id",
+                code="CODING_PROBLEM_ID_MISSING",
+            )
+        problem_id = uuid.UUID(ref["coding_problem_id"])
+        problem = await self._coding_problems.get_active_with_test_cases(problem_id)
+        if problem is None:
+            raise UnprocessableEntityError(
+                "the selected catalog coding problem is no longer active", code="PROBLEM_NOT_FOUND"
+            )
+
+        question = Question(
+            topic=ref["topic"],
+            difficulty=DifficultyLevel(ref["difficulty"]),
+            question_text=problem.description,
+            question_type=QuestionType.CODING,
+            source=QuestionSource.BANK,  # a catalog pick, not LLM-generated (module §8)
+            asked_at=datetime.now(UTC),
+            parent_question_id=None,  # coding questions never have follow-ups (module §8)
+            coding_problem_id=problem.id,
+            coding_snapshot={
+                "title": problem.title,
+                "constraints": problem.constraints,
+                "expected_time_complexity": problem.expected_time_complexity,
+                "expected_space_complexity": problem.expected_space_complexity,
+                "supported_languages": problem.supported_languages,
+                "starter_code": problem.starter_code,
+                "topics": problem.topics,
+            },
+        )
+        question.round = round_
+        question.test_cases = [
+            QuestionTestCase(
+                input=tc.input,
+                expected_output=tc.expected_output,
+                is_sample=tc.is_sample,
+                weight=tc.weight,
+                sequence_no=tc.sequence_no,
+            )
+            for tc in problem.test_cases
+        ]
+        await self._questions.add(question)
+        return question
+
 
 # --- Pure helpers (state <-> ORM/context conversion) ------------------------
 
 
 def _first_executable_round_index(rounds: list[RoundExecutionPlan]) -> int | None:
-    for round_plan in sorted(rounds, key=lambda r: r.sequence_no):
-        if round_plan.round_type != RoundType.CODING:
-            return round_plan.sequence_no
-    return None
+    """The lowest sequence_no in the plan — Module 6 removed the only
+    reason this ever skipped anything (coding rounds are real now, see
+    app/agents/nodes/coding_problem_selector.py), so this returns None
+    only for a genuinely empty plan (a planning bug Module 4's planner
+    should never actually produce, but guarded rather than assumed).
+    """
+    if not rounds:
+        return None
+    return min(round_plan.sequence_no for round_plan in rounds)
 
 
 def _round_plan_to_dict(r: RoundExecutionPlan) -> dict:
@@ -553,6 +752,26 @@ def _question_to_ref(question: Question, round_type: str) -> QuestionRef:
         "parent_question_id": (
             str(question.parent_question_id) if question.parent_question_id else None
         ),
+        "coding_problem_id": (
+            str(question.coding_problem_id) if question.coding_problem_id else None
+        ),
+    }
+
+
+def _coding_problem_to_candidate(problem: CodingProblem) -> CodingProblemCandidate:
+    return {
+        "id": str(problem.id),
+        "slug": problem.slug,
+        "title": problem.title,
+        "description": problem.description,
+        "difficulty": problem.difficulty.value,
+        "topics": problem.topics,
+        "constraints": problem.constraints,
+        "expected_time_complexity": problem.expected_time_complexity,
+        "expected_space_complexity": problem.expected_space_complexity,
+        "supported_languages": problem.supported_languages,
+        "starter_code": problem.starter_code,
+        "role_keys": problem.role_keys,
     }
 
 

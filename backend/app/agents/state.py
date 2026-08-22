@@ -21,8 +21,15 @@ from typing import Any, Literal, TypedDict
 
 # What kind of turn this graph invocation is processing — drives the
 # Supervisor's routing (module §2/§13: explicit, deterministic transitions,
-# never an LLM-chosen graph edge).
-Trigger = Literal["START", "SUBMIT_ANSWER"]
+# never an LLM-chosen graph edge). Module 6 — CODING_ROUND_COMPLETE: the
+# candidate's final code submission has already been executed and graded
+# by CodingRoundService (outside the graph entirely — Run/Submit are plain
+# service calls, never graph turns, module §9's explicit instruction).
+# This trigger only asks the graph to do the same round-advancement a
+# SUBMIT_ANSWER's NEXT_ROUND path does, skipping straight to
+# round_transition — no evaluate_answer/adapt_difficulty, since there is
+# no free-text answer or difficulty signal for a coding round.
+Trigger = Literal["START", "SUBMIT_ANSWER", "CODING_ROUND_COMPLETE"]
 
 # The Supervisor's deterministic post-evaluation decision (module §13).
 NextAction = Literal["FOLLOW_UP", "NEXT_QUESTION", "NEXT_ROUND", "COMPLETE"]
@@ -40,6 +47,36 @@ class QuestionRef(TypedDict):
     round_type: str
     difficulty: str
     parent_question_id: str | None
+    # Module 6 — set only when round_type="coding": the selected catalog
+    # problem's id (str(uuid)), so the service can copy its test cases
+    # into QuestionTestCase rows at persistence time. None otherwise. Test
+    # case DATA (hidden or sample) never enters graph state at all — see
+    # app/agents/nodes/coding_problem_selector.py's docstring.
+    coding_problem_id: str | None
+
+
+class CodingProblemCandidate(TypedDict):
+    """One catalog problem's selectable metadata — everything
+    select_coding_problem_node needs to pick and describe a problem,
+    deliberately excluding test cases (module §8: hidden tests never
+    leave the service/repository layer, not even into a LangGraph
+    checkpoint). Precomputed once per graph invocation by the service
+    (mirrors round_plan/personalization_context — module §14's "the graph
+    itself has no repository access" boundary).
+    """
+
+    id: str
+    slug: str
+    title: str
+    description: str
+    difficulty: str
+    topics: list[str]
+    constraints: str | None
+    expected_time_complexity: str | None
+    expected_space_complexity: str | None
+    supported_languages: list[str]
+    starter_code: dict[str, str]
+    role_keys: list[str]
 
 
 class AnswerRef(TypedDict):
@@ -109,6 +146,13 @@ class InterviewState(TypedDict):
     # query).
     company: str | None
     role: str
+    # Module 6 — the taxonomy key (app/services/resume/role_profiles.json),
+    # distinct from `role` (the display title) — select_coding_problem
+    # needs this for role-priority matching, the same taxonomy Module 4's
+    # catalog already keys role-specific coding_problems.role_keys on
+    # (module §4's "one taxonomy, not two" rule). None for a role with no
+    # matching taxonomy entry — generic catalog problems still apply.
+    role_key: str | None
     mode: str
     round_plan: list[dict[str, Any]]  # ordered RoundExecutionPlan-shaped dicts
 
@@ -152,11 +196,20 @@ class InterviewState(TypedDict):
     trigger: Trigger
     next_action: NextAction | None
     interview_status: str  # SessionStatus.value this turn is about to make durable
-    # sequence_no's the round-transition step jumped over this turn (coding
-    # rounds, module §15) — the service persists these as
-    # InterviewRound.status=SKIPPED.
-    rounds_to_skip: list[int]
 
     # --- Grounding text assembled once per turn by the (deterministic)
     # Knowledge Agent, fed into whichever LLM call needs it this turn.
     knowledge_context: str
+
+    # --- Module 6: coding-round selection. Every active catalog problem
+    # (small — module §8's "small, high-quality catalog"), precomputed by
+    # the service so select_coding_problem_node stays DB-free like every
+    # other node (module §14). Filtered/picked deterministically at node
+    # execution time against whatever current_round/current_difficulty/
+    # role_key turn out to be *after* this turn's own adaptation — see
+    # app/agents/policy.py's select_coding_problem.
+    coding_problem_candidates: list[CodingProblemCandidate]
+    # Catalog problem ids already asked anywhere in THIS interview (not
+    # reset per round, unlike question_history) — best-effort repeat
+    # avoidance across multiple coding rounds in one plan (module §8).
+    coding_problem_history: list[str]

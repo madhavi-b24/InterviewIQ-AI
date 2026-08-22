@@ -12,12 +12,32 @@ from app.agents.state import InterviewState
 from app.models.enums import RoundType
 
 
-def route_entry(state: InterviewState) -> Literal["generate_question", "evaluate_answer"]:
+def route_entry(
+    state: InterviewState,
+) -> Literal["generate_question", "select_coding_problem", "evaluate_answer", "round_transition"]:
     """Conditional-edge path function from START. Routes purely on
-    `trigger`, set by the service layer before invoking — an explicit,
-    typed signal, never inferred from state shape.
+    `trigger` (and, for START, `current_round`'s type) — explicit, typed
+    signals set by the service layer before invoking, never inferred from
+    incidental state shape.
+
+    Module 6: a plan's first round can now genuinely be CODING (Module 5's
+    `_first_executable_round_index` used to skip coding rounds even as the
+    starting round — that exclusion is gone, see
+    app/services/interview/execution_service.py), so START itself needs
+    the same round-type branch NEXT_ROUND already needs via
+    route_after_round_transition. CODING_ROUND_COMPLETE always goes
+    straight to round_transition — no evaluate_answer/adapt_difficulty for
+    a round that was never a free-text turn.
     """
-    return "generate_question" if state["trigger"] == "START" else "evaluate_answer"
+    if state["trigger"] == "CODING_ROUND_COMPLETE":
+        return "round_transition"
+    if state["trigger"] == "SUBMIT_ANSWER":
+        return "evaluate_answer"
+    return (
+        "select_coding_problem"
+        if state["current_round"] == RoundType.CODING.value
+        else "generate_question"
+    )
 
 
 def decide_next_action(state: InterviewState) -> dict[str, Any]:

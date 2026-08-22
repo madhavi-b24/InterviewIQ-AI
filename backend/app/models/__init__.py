@@ -6,6 +6,7 @@ Add new model modules to this list, don't rely on side-effect import order.
 """
 
 from app.db.base import Base
+from app.models.coding import CodingProblem, CodingProblemTestCase
 from app.models.evaluation import AnswerEvaluation, CodingEvaluation
 from app.models.interview import (
     Answer,
@@ -55,6 +56,8 @@ __all__ = [
     "Role",
     "InterviewTemplate",
     "TemplateRound",
+    "CodingProblem",
+    "CodingProblemTestCase",
     "InterviewSession",
     "InterviewRound",
     "Question",
