@@ -145,6 +145,17 @@ class Settings(BaseSettings):
     CODE_EVALUATION_PROVIDER: Literal["gemini", "fake"] = "gemini"
     CODE_EVALUATION_TIMEOUT_SECONDS: int = 45
 
+    # --- Report Generator & Learning Roadmap (Module 7) -------------------
+    # ReportGenerationProvider (app/services/report_generation/) — the
+    # LLM-backed seam behind section/overall explanations, weak/strong-area
+    # narrative, and learning-roadmap resource content. Every score in a
+    # report (section scores, overall score, weak-area severity) is
+    # computed deterministically in app/agents/policy.py before this
+    # provider is ever called — never asked of the model. Same "fake"
+    # rationale/production-guard as CODE_EVALUATION_PROVIDER above.
+    REPORT_GENERATION_PROVIDER: Literal["gemini", "fake"] = "gemini"
+    REPORT_GENERATION_TIMEOUT_SECONDS: int = 45
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -31,7 +31,8 @@ from app.core.logging import get_logger
 from app.db.session import get_session_factory
 from app.execution.factories import build_code_executor
 from app.jobs.background_tasks_runner import JOB_HANDLERS
-from app.models.enums import CodeExecutionStatus
+from app.jobs.report_generation import generate_report_job
+from app.models.enums import CodeExecutionStatus, SessionStatus
 from app.models.interview import Answer, InterviewRound, InterviewSession, Question
 from app.services.code_evaluation.factories import build_code_evaluation_provider
 from app.services.coding.coding_round_service import CodingRoundService
@@ -111,6 +112,23 @@ async def run_code_submission_job(*, job_id: str, submission_id: str) -> None:
                 submission_id=submission_id,
                 interview_id=str(interview.id),
             )
+            # Module 7 — `interview` is the same identity-mapped ORM object
+            # complete_coding_round mutated in place within this same
+            # session, so `.status` already reflects the just-committed
+            # transition without needing its return value. No JobRunner
+            # exists here (this function is already running as a
+            # background task — there's no live BackgroundTasks to enqueue
+            # onto, and no persistent queue exists yet in this codebase,
+            # Roadmap.md's Celery work being Module 9), so the report job
+            # is invoked directly rather than enqueued — see
+            # app/jobs/report_generation.py's module docstring for why
+            # this is still the same job function either way.
+            if interview.status == SessionStatus.COMPLETED:
+                await generate_report_job(
+                    job_id=str(uuid.uuid4()),
+                    interview_id=str(interview.id),
+                    user_id=str(interview.user_id),
+                )
 
 
 JOB_HANDLERS["run_code_submission"] = run_code_submission_job

@@ -8,7 +8,7 @@ transitions").
 
 from typing import TYPE_CHECKING
 
-from app.models.enums import DifficultyLevel, DifficultySignal, RoundType
+from app.models.enums import DifficultyLevel, DifficultySignal, RoundType, Severity
 
 if TYPE_CHECKING:
     from app.agents.state import CodingProblemCandidate
@@ -167,3 +167,79 @@ def compute_overall_code_score(
         + readability_score * weights["quality"]
     )
     return round(total, 2)
+
+
+# --- Report aggregation (Module 7) -------------------------------------
+# Database.md §7's "Score aggregation" formula, made concrete. Every
+# number in a report is computed here — Gemini is only ever asked for
+# explanation/narrative text (ReportGenerationProvider), never a score,
+# same "don't let the model freely decide the headline number" rule
+# compute_overall_code_score above already follows.
+
+
+def compute_section_score(scores: list[float]) -> float:
+    """Plain average of one dimension's scores across every contributing
+    evaluation row in the session (Database.md §7) — e.g. every
+    `AnswerEvaluation.technical_score`, or every
+    `CodingEvaluation.overall_code_score` for the coding section. Callers
+    never call this with an empty list — a section with zero contributing
+    rows simply gets no `ReportSectionScore` row at all (mirrors
+    `report_section_scores`'s existing "no coding row if no coding round"
+    design), so there's no empty-average convention to define here.
+    """
+    return round(sum(scores) / len(scores), 2)
+
+
+def compute_round_composite(scores: list[float]) -> float:
+    """Database.md §7: "for each round, average the dimension scores
+    produced by answers/submissions within that round". `scores` is every
+    dimension score contributed by that one round — all four
+    `AnswerEvaluation` fields per text answer, or the single
+    `CodingEvaluation.overall_code_score` per coding submission — pooled
+    together and averaged into one composite number for the round. Same
+    plain-average shape as compute_section_score; kept as a separate
+    function since the two operate over different groupings (by dimension
+    across the session vs. by round) and conflating them would make a
+    call site's intent less obvious.
+    """
+    return round(sum(scores) / len(scores), 2)
+
+
+def compute_overall_score(round_composites: list[tuple[float, float]]) -> float:
+    """Database.md §7: overall_score = weighted average of per-round
+    composite scores, weighted by `interview_rounds.weight` (the
+    snapshotted template weight). `round_composites` is a list of
+    `(composite_score, weight)` pairs, one per round that actually
+    contributed evaluations (a round with zero evaluations — e.g. a
+    coding round that was never reached — contributes no pair). Falls
+    back to 0.0 only if every round has zero weight, which is a catalog
+    configuration error, not a normal runtime state.
+    """
+    total_weight = sum(weight for _, weight in round_composites)
+    if total_weight == 0:
+        return 0.0
+    weighted_sum = sum(composite * weight for composite, weight in round_composites)
+    return round(weighted_sum / total_weight, 2)
+
+
+# Thresholds mirror _DIFFICULTY_INCREASE_THRESHOLD/_DIFFICULTY_DECREASE_THRESHOLD
+# above in spirit (deterministic bucketing of a 0-100 score) but are a
+# separate, independently-tunable scale — a weak area's severity and the
+# difficulty-adaptation dead zone answer different questions and have no
+# reason to share thresholds.
+_WEAK_AREA_HIGH_SEVERITY_MAX = 40.0
+_WEAK_AREA_MEDIUM_SEVERITY_MAX = 65.0
+
+
+def classify_weak_area_severity(score: float) -> Severity:
+    """Deterministic score-threshold bucketing — severity is never asked
+    of the LLM (module §11's rule extended to report generation): Gemini
+    identifies WHICH topics are weak and writes the evidence narrative,
+    but how severe a given weak area is comes from the score that made it
+    a candidate weak area in the first place.
+    """
+    if score <= _WEAK_AREA_HIGH_SEVERITY_MAX:
+        return Severity.HIGH
+    if score <= _WEAK_AREA_MEDIUM_SEVERITY_MAX:
+        return Severity.MEDIUM
+    return Severity.LOW
