@@ -1,6 +1,6 @@
 # InterviewIQ AI — System Architecture
 
-Status: **Module 1 — locked pending final consistency pass**
+Status: **Locked at Module 1; implementation status through Module 8 tracked inline in §5 below**
 Owner: Architecture module (Module 1)
 
 This document defines the system architecture for InterviewIQ AI. [Database.md](Database.md) derives its entities from the domains defined here.
@@ -125,7 +125,7 @@ flowchart TD
 
 ## 5. Multi-Agent Interview Engine (LangGraph)
 
-**Status (Module 5): §5.1–5.3 and §5.5 implemented for text rounds** (introduction, technical, behavioral, resume_discussion, system_design). **§5.4 (coding round) is now Module 6** — coding rounds execute for real (real sandboxed execution, real Run/Submit lifecycle); the round-selection and round-advancement mechanics are wired into the same LangGraph engine described here, while Run/Submit themselves are deliberately plain service calls outside the graph (§5.4 below explains why). Learning Agent and Report Agent (roster below) are Module 7, not built. See `app/agents/` (graph + nodes), `app/services/interview_intelligence/` (the Gemini-backed provider seam), `app/services/interview/execution_service.py` (text-round + round-advancement orchestration/persistence), and `app/services/coding/coding_round_service.py` (Module 6's Run/Submit orchestration) for the actual implementation, and backend/README.md's "Interview Engine (Module 5)" and "Coding Round & Code Execution (Module 6)" sections for the full design writeups including deviations from this section's original sketch, called out inline below.
+**Status (through Module 8): §5.1–5.3 and §5.5 implemented for text rounds** (introduction, technical, behavioral, resume_discussion, system_design). **§5.4 (coding round) is Module 6** — coding rounds execute for real (real sandboxed execution, real Run/Submit lifecycle); the round-selection and round-advancement mechanics are wired into the same LangGraph engine described here, while Run/Submit themselves are deliberately plain service calls outside the graph (§5.4 below explains why). **Learning Agent and Report Agent (roster below) are Module 7, implemented** — also deliberately outside the graph (a post-session aggregation workflow, not a conversational turn), see `app/services/report/`/`app/services/report_generation/`. **Module 8 (Progress Dashboard)** adds no agent at all — `app/services/progress/progress_service.py` is pure deterministic aggregation over Module 7's own output, invoked as one more step inside Module 7's existing report-generation job, never a graph node. See `app/agents/` (graph + nodes), `app/services/interview_intelligence/` (the Gemini-backed provider seam), `app/services/interview/execution_service.py` (text-round + round-advancement orchestration/persistence), `app/services/coding/coding_round_service.py` (Module 6's Run/Submit orchestration), `app/services/report/report_service.py` (Module 7's report/roadmap aggregation), and `app/services/progress/progress_service.py` (Module 8) for the actual implementation, and backend/README.md's per-module sections for the full design writeups including deviations from this section's original sketch, called out inline below.
 
 ### 5.1 Agent Roster
 

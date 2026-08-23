@@ -78,6 +78,16 @@ class ReportWeakArea(Base, UUIDPrimaryKeyMixin):
         pg_enum(Severity, name="report_weak_areas_severity_enum"), nullable=False
     )
     evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Module 8 — additive, nullable: which of the five report_section_scores
+    # rows this topic belongs to. Known at generation time (the same signal
+    # ReportService already uses to compute `severity` above) but never
+    # persisted until now — Module 8's skill_progress needs it to score a
+    # topic against the *correct* section rather than guessing. NULL on
+    # every row generated before this column existed; ProgressService
+    # skips those rather than guessing (see report_service.py/progress_service.py).
+    section: Mapped[ReportSection | None] = mapped_column(
+        pg_enum(ReportSection, name="report_weak_areas_section_enum"), nullable=True
+    )
 
     report: Mapped["InterviewReport"] = relationship(back_populates="weak_areas")
 
@@ -93,6 +103,10 @@ class ReportStrongArea(Base, UUIDPrimaryKeyMixin):
     )
     topic: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Module 8 — same addition/reasoning as ReportWeakArea.section above.
+    section: Mapped[ReportSection | None] = mapped_column(
+        pg_enum(ReportSection, name="report_strong_areas_section_enum"), nullable=True
+    )
 
     report: Mapped["InterviewReport"] = relationship(back_populates="strong_areas")
 

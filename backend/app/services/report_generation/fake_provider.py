@@ -59,7 +59,9 @@ class FakeReportGenerationProvider:
         ]
         strong_areas = [
             StrongAreaContent(
-                topic=name.replace("_", " ").title(), evidence_text=f"Fake evidence for {name}."
+                topic=name.replace("_", " ").title(),
+                section=name,
+                evidence_text=f"Fake evidence for {name}.",
             )
             for name, score in section_scores.items()
             if score >= 80.0

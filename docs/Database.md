@@ -566,6 +566,7 @@ Unique: `(report_id, section)`.
 | topic | text | not null |
 | severity | enum(`low`,`medium`,`high`) | only on weak_areas |
 | evidence_text | text | not null — quoted/paraphrased from the actual answer that triggered this |
+| section | enum(`technical`,`coding`,`communication`,`problem_solving`,`confidence`) | nullable — *(Module 8)* which `report_section_scores` row this topic belongs to; known at report-generation time but not persisted until Module 8 needed it (skill_progress scores a topic against this section's score rather than guessing). NULL on every row generated before this column existed |
 
 ### `learning_roadmaps`
 
@@ -592,6 +593,8 @@ Unique: `(report_id, section)`.
 ---
 
 ## 8. Progress Domain
+
+**Status: implemented in Module 8.** All three tables were modeled ahead of time (Module 1 baseline); Module 8 is the first module to actually write to them — via `ProgressService.record_session_progress` (`app/services/progress/`), called once per generated report from `app/jobs/report_generation.py` (Module 7's existing job, not a background job of its own — every write here is deterministic aggregation, no LLM call). `skill_name`/topic-to-section mapping is normalized through the existing `app/services/resume/skill_normalization.py::normalize_skill` (Module 3), reused rather than duplicated. `trend`/`classify_score_trend` lives in `app/agents/policy.py` alongside every other deterministic scoring rule in the project — never LLM-guessed.
 
 ### `skill_progress`
 

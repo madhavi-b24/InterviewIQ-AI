@@ -281,12 +281,17 @@ class ReportService:
                 topic=wa.topic,
                 severity=classify_weak_area_severity(section_scores[wa.section]),
                 evidence_text=wa.evidence_text,
+                section=ReportSection(wa.section),
             )
             for wa in content.weak_areas
             if wa.section in section_scores
         ]
         report.strong_areas = [
-            ReportStrongArea(topic=sa.topic, evidence_text=sa.evidence_text)
+            ReportStrongArea(
+                topic=sa.topic,
+                evidence_text=sa.evidence_text,
+                section=ReportSection(sa.section) if sa.section in section_scores else None,
+            )
             for sa in content.strong_areas
         ]
 

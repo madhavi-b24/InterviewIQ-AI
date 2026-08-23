@@ -40,6 +40,9 @@ class WeakAreaContent(BaseModel):
 
 class StrongAreaContent(BaseModel):
     topic: str
+    section: Literal["technical", "coding", "communication", "problem_solving", "confidence"] = (
+        Field(description="Which of the five report sections this strong area belongs to")
+    )
     evidence_text: str
 
 
