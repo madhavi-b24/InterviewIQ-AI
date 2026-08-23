@@ -13,11 +13,13 @@ import uuid
 
 from fastapi import APIRouter, Query, status
 
+import app.jobs.report_generation  # noqa: F401 — import registers JOB_HANDLERS["generate_report"]
 from app.api.deps import (
     CurrentUser,
     InterviewAgentProviderDep,
     InterviewExecutionServiceDep,
     InterviewPlannerServiceDep,
+    JobRunnerDep,
 )
 from app.models.enums import SessionStatus
 from app.models.interview import InterviewSession, Question
@@ -183,6 +185,7 @@ async def submit_answer(
     current_user: CurrentUser,
     execution: InterviewExecutionServiceDep,
     provider: InterviewAgentProviderDep,
+    job_runner: JobRunnerDep,
 ) -> AnswerResponseOut:
     interview, evaluation, previous_difficulty, next_question = await execution.submit_answer(
         interview_id=interview_id,
@@ -194,10 +197,16 @@ async def submit_answer(
     if next_question is not None:
         next_out = NextOut(type="question", question=_question_out(next_question))
     else:
-        # No Module 7 report generator yet — report_id is intentionally
-        # omitted rather than fabricated (deviation from API.md's sketch,
-        # documented here the same way prior modules document their own).
+        # Module 7 — report_id is still omitted here rather than fabricated:
+        # generation is durable background work (decision #1), never ready
+        # by the time this response is built. The candidate polls
+        # GET .../report until it's available.
         next_out = NextOut(type="session_complete")
+        if interview.status == SessionStatus.COMPLETED:
+            job_runner.enqueue(
+                "generate_report",
+                {"interview_id": str(interview.id), "user_id": str(interview.user_id)},
+            )
     return AnswerResponseOut(
         interview_id=interview.id,
         status=interview.status,

@@ -14,7 +14,13 @@ from sqlalchemy.orm import selectinload
 
 from app.models.coding import CodingProblem
 from app.models.evaluation import CodingEvaluation
-from app.models.interview import CodeSubmission, CodeSubmissionTestResult
+from app.models.interview import (
+    Answer,
+    CodeSubmission,
+    CodeSubmissionTestResult,
+    InterviewRound,
+    Question,
+)
 from app.repositories.base import BaseRepository
 
 # selectinload chain reused by both read methods below — the API layer
@@ -113,3 +119,25 @@ class CodingEvaluationRepository(BaseRepository[CodingEvaluation]):
         )
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_for_session_with_round_id(
+        self, session_id: uuid.UUID
+    ) -> list[tuple[CodingEvaluation, uuid.UUID]]:
+        """Module 7 — mirrors AnswerEvaluationRepository.list_for_session_with_round_id's
+        join style: CodingEvaluation -> CodeSubmission -> Answer -> Question
+        -> InterviewRound, filtered by session_id. Every CodingEvaluation
+        row is already implicitly a *final* submission's evaluation (module
+        §6/§10 — non-final Run attempts are never evaluated, and is_final
+        is set at most once per answer via the DB's own partial unique
+        index), so no extra is_final filter is needed here.
+        """
+        stmt = (
+            select(CodingEvaluation, InterviewRound.id)
+            .join(CodeSubmission, CodingEvaluation.code_submission_id == CodeSubmission.id)
+            .join(Answer, CodeSubmission.answer_id == Answer.id)
+            .join(Question, Answer.question_id == Question.id)
+            .join(InterviewRound, Question.round_id == InterviewRound.id)
+            .where(InterviewRound.session_id == session_id)
+        )
+        result = await self._session.execute(stmt)
+        return [(row[0], row[1]) for row in result.all()]

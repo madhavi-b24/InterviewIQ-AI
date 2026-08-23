@@ -38,6 +38,9 @@ from app.services.interview_intelligence.provider import (
 from app.services.oauth import GoogleOAuthProvider
 from app.services.planning.catalog_service import CatalogService
 from app.services.planning.interview_planner import InterviewPlannerService
+from app.services.report.report_service import ReportService
+from app.services.report_generation.factories import build_report_generation_provider
+from app.services.report_generation.provider import ReportGenerationProvider
 from app.services.resume.factories import build_embedding_index, build_resume_storage
 from app.services.resume.resume_service import ResumeService
 from app.storage.base import ResumeStorage
@@ -76,6 +79,22 @@ def get_coding_round_service(session: DbSession) -> CodingRoundService:
 
 
 CodingRoundServiceDep = Annotated[CodingRoundService, Depends(get_coding_round_service)]
+
+
+def get_report_generation_provider(settings: AppSettings) -> ReportGenerationProvider:
+    return build_report_generation_provider(settings)
+
+
+ReportGenerationProviderDep = Annotated[
+    ReportGenerationProvider, Depends(get_report_generation_provider)
+]
+
+
+def get_report_service(session: DbSession) -> ReportService:
+    return ReportService(session)
+
+
+ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
 
 
 async def _bearer_token(authorization: str | None) -> str:

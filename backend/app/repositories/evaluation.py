@@ -35,3 +35,25 @@ class AnswerEvaluationRepository(BaseRepository[AnswerEvaluation]):
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def list_for_session_with_round_id(
+        self, session_id: uuid.UUID
+    ) -> list[tuple[AnswerEvaluation, uuid.UUID]]:
+        """Module 7 — same join as list_for_session above, but also
+        returns each row's `InterviewRound.id` so ReportService can group
+        scores by round (Database.md §7's overall_score needs a per-round
+        composite before it can apply `interview_rounds.weight`).
+        Added as a new method rather than changing list_for_session's
+        return shape — that method already has a caller
+        (InterviewState.interview_scores) that depends on its current
+        flat-list shape.
+        """
+        stmt = (
+            select(AnswerEvaluation, InterviewRound.id)
+            .join(Answer, AnswerEvaluation.answer_id == Answer.id)
+            .join(Question, Answer.question_id == Question.id)
+            .join(InterviewRound, Question.round_id == InterviewRound.id)
+            .where(InterviewRound.session_id == session_id)
+        )
+        result = await self._session.execute(stmt)
+        return [(row[0], row[1]) for row in result.all()]

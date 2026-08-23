@@ -27,6 +27,9 @@ from app.services.interview_intelligence.fake_provider import (  # noqa: E402
     get_fake_interview_agent_provider,
 )
 from app.services.planning.catalog_seed import seed_catalog  # noqa: E402
+from app.services.report_generation.fake_provider import (  # noqa: E402
+    get_fake_report_generation_provider,
+)
 from app.services.resume_intelligence.fake_provider import (  # noqa: E402
     get_fake_resume_intelligence_provider,
 )
@@ -90,6 +93,10 @@ async def _clean_state_between_tests() -> AsyncGenerator[None]:
     # DI, so their fail/timeout/forced_* flags are reset here too.
     get_fake_code_executor().reset()
     get_fake_code_evaluation_provider().reset()
+    # Module 7 — same rationale again: the report-generation job builds
+    # this provider itself (app/jobs/report_generation.py), outside
+    # FastAPI's DI.
+    get_fake_report_generation_provider().reset()
     yield
     await engine.dispose()
     await get_redis_pool().disconnect()
