@@ -1,19 +1,21 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useAuthStore } from "@/features/auth/store";
 import { useResumeStore } from "@/features/resume/store";
+import { useInterviewStore } from "@/features/interview/store";
 import { Button, buttonClasses } from "@/components";
 
 /**
- * Auth-aware nav shell (frontend plan §H/Stage 2, extended in Stage 3).
- * Interview/coding/dashboard nav items still wait for their own later
- * stages (linking to a route that doesn't exist yet would be worse than
- * no link at all) — Resumes is added now because that route genuinely
- * exists as of this stage.
+ * Auth-aware nav shell (frontend plan §H/Stage 2, extended in Stage 3/4).
+ * Coding/dashboard nav items still wait for their own later stages
+ * (linking to a route that doesn't exist yet would be worse than no link
+ * at all) — Resumes/Plan Interview are added now because those routes
+ * genuinely exist as of this stage.
  */
 export function Navbar() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const logout = useAuthStore((state) => state.logout);
   const resetResumeState = useResumeStore((state) => state.reset);
+  const resetInterviewState = useInterviewStore((state) => state.reset);
   const navigate = useNavigate();
 
   function handleLogout() {
@@ -22,6 +24,7 @@ export function Navbar() {
     // session's cached data (frontend plan §C.30).
     void logout().then(() => {
       resetResumeState();
+      resetInterviewState();
       navigate("/", { replace: true });
     });
   }
@@ -37,6 +40,9 @@ export function Navbar() {
             <>
               <Link to="/resumes" className={buttonClasses("ghost", "sm")}>
                 Resumes
+              </Link>
+              <Link to="/interviews/new" className={buttonClasses("ghost", "sm")}>
+                Plan Interview
               </Link>
               <Link to="/profile" className={buttonClasses("ghost", "sm")}>
                 Profile

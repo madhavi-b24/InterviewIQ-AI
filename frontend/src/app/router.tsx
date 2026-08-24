@@ -11,6 +11,7 @@ import { VerifyEmailPage } from "@/features/auth/pages/VerifyEmailPage";
 import { ProfilePage } from "@/features/auth/pages/ProfilePage";
 import { ResumeListPage } from "@/features/resume/pages/ResumeListPage";
 import { ResumeDetailPage } from "@/features/resume/pages/ResumeDetailPage";
+import { PlanInterviewPage } from "@/features/interview/pages/PlanInterviewPage";
 
 /**
  * The route tree itself, exported separately from the browser-router
@@ -34,6 +35,10 @@ import { ResumeDetailPage } from "@/features/resume/pages/ResumeDetailPage";
  * Stage 3 adds the two resume routes (§C.7/§C.8) under the same
  * ProtectedRoute group as profile — resumes are owner-scoped candidate
  * data, same as profile.
+ *
+ * Stage 4 adds the planning wizard (§C.9). Deliberately stops at
+ * `/interviews/new` — no `/interviews` history list and no `/interviews/:id`
+ * live-session shell yet; those are named for later stages, not this one.
  */
 export const routeConfig: RouteObject[] = [
   {
@@ -57,6 +62,7 @@ export const routeConfig: RouteObject[] = [
           { path: "profile", element: <ProfilePage /> },
           { path: "resumes", element: <ResumeListPage /> },
           { path: "resumes/:resumeId", element: <ResumeDetailPage /> },
+          { path: "interviews/new", element: <PlanInterviewPage /> },
         ],
       },
       { path: "*", element: <NotFoundPage /> },
