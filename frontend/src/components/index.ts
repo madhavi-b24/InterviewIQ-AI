@@ -16,3 +16,5 @@ export { ErrorBanner } from "./ErrorBanner";
 export type { ErrorBannerProps } from "./ErrorBanner";
 export { EmptyState } from "./EmptyState";
 export type { EmptyStateProps } from "./EmptyState";
+export { ConfirmDialog } from "./ConfirmDialog";
+export type { ConfirmDialogProps } from "./ConfirmDialog";
