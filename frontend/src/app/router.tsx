@@ -9,6 +9,8 @@ import { ForgotPasswordPage } from "@/features/auth/pages/ForgotPasswordPage";
 import { ResetPasswordPage } from "@/features/auth/pages/ResetPasswordPage";
 import { VerifyEmailPage } from "@/features/auth/pages/VerifyEmailPage";
 import { ProfilePage } from "@/features/auth/pages/ProfilePage";
+import { ResumeListPage } from "@/features/resume/pages/ResumeListPage";
+import { ResumeDetailPage } from "@/features/resume/pages/ResumeDetailPage";
 
 /**
  * The route tree itself, exported separately from the browser-router
@@ -28,6 +30,10 @@ import { ProfilePage } from "@/features/auth/pages/ProfilePage";
  * before the page ever got to act on the token. ProtectedRoute wraps
  * profile. Every later stage's routes land the same way, without needing
  * to restructure this file's shape.
+ *
+ * Stage 3 adds the two resume routes (§C.7/§C.8) under the same
+ * ProtectedRoute group as profile — resumes are owner-scoped candidate
+ * data, same as profile.
  */
 export const routeConfig: RouteObject[] = [
   {
@@ -47,7 +53,11 @@ export const routeConfig: RouteObject[] = [
       { path: "verify-email/:token", element: <VerifyEmailPage /> },
       {
         element: <ProtectedRoute />,
-        children: [{ path: "profile", element: <ProfilePage /> }],
+        children: [
+          { path: "profile", element: <ProfilePage /> },
+          { path: "resumes", element: <ResumeListPage /> },
+          { path: "resumes/:resumeId", element: <ResumeDetailPage /> },
+        ],
       },
       { path: "*", element: <NotFoundPage /> },
     ],
