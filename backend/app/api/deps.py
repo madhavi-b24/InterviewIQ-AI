@@ -38,6 +38,7 @@ from app.services.interview_intelligence.provider import (
 from app.services.oauth import GoogleOAuthProvider
 from app.services.planning.catalog_service import CatalogService
 from app.services.planning.interview_planner import InterviewPlannerService
+from app.services.progress.progress_service import ProgressService
 from app.services.report.report_service import ReportService
 from app.services.report_generation.factories import build_report_generation_provider
 from app.services.report_generation.provider import ReportGenerationProvider
@@ -95,6 +96,13 @@ def get_report_service(session: DbSession) -> ReportService:
 
 
 ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
+
+
+def get_progress_service(session: DbSession) -> ProgressService:
+    return ProgressService(session)
+
+
+ProgressServiceDep = Annotated[ProgressService, Depends(get_progress_service)]
 
 
 async def _bearer_token(authorization: str | None) -> str:

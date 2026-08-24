@@ -17,6 +17,7 @@ from app.api.deps import (
 from app.core.exceptions import ServiceUnavailableError, UnauthorizedError
 from app.schemas.auth import (
     AuthResponse,
+    EmailVerificationConfirmRequest,
     LoginRequest,
     LogoutRequest,
     PasswordResetConfirmRequest,
@@ -37,8 +38,10 @@ _OAUTH_STATE_TTL_SECONDS = 300
 
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register(data: RegisterRequest, auth_service: AuthServiceDep) -> AuthResponse:
-    user, tokens = await auth_service.register(data)
+async def register(
+    data: RegisterRequest, auth_service: AuthServiceDep, email_provider: EmailProviderDep
+) -> AuthResponse:
+    user, tokens = await auth_service.register(data, email_provider=email_provider)
     return AuthResponse(user=UserPublic.model_validate(user), **tokens.model_dump())
 
 
@@ -133,3 +136,24 @@ async def confirm_password_reset(
 ) -> Response:
     await auth_service.confirm_password_reset(token=data.token, new_password=data.new_password)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/verify-email")
+async def verify_email(
+    data: EmailVerificationConfirmRequest, auth_service: AuthServiceDep
+) -> UserPublic:
+    user = await auth_service.verify_email(token=data.token)
+    return UserPublic.model_validate(user)
+
+
+@router.post("/resend-verification", status_code=status.HTTP_202_ACCEPTED)
+async def resend_verification(
+    current_user: CurrentUser, auth_service: AuthServiceDep, email_provider: EmailProviderDep
+) -> dict:
+    """Authenticated rather than by-email like password-reset/request — an
+    expired/lost verification link's honest recovery path is "sign back
+    in, then resend from your account", not a second unauthenticated
+    email-enumeration surface next to the one password-reset already is.
+    """
+    await auth_service.resend_verification_email(user=current_user, email_provider=email_provider)
+    return {"message": "if your email is not yet verified, a new verification link has been sent"}

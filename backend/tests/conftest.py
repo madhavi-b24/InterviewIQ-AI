@@ -44,9 +44,13 @@ class FakeEmailProvider(EmailProvider):
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.sent_verifications: list[tuple[str, str]] = []
 
     async def send_password_reset_email(self, *, to: str, reset_token: str) -> None:
         self.sent.append((to, reset_token))
+
+    async def send_verification_email(self, *, to: str, verification_token: str) -> None:
+        self.sent_verifications.append((to, verification_token))
 
 
 @pytest.fixture(autouse=True)

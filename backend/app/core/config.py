@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # --- Password reset (Module 2)
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
 
+    # --- Email verification (frontend auth stage). Longer-lived than the
+    # password-reset token: an unverified inbox check is far less
+    # security-time-sensitive than a password reset, and an unnecessarily
+    # short window here just produces support tickets, not safety.
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES: int = 1440
+
     # --- Email delivery (Module 2). "console" logs the reset link instead of
     # sending real email — the only mock allowed in non-production, see
     # app/services/email.py. There is no production provider wired up yet;

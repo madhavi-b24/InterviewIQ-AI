@@ -30,13 +30,15 @@ from app.core.security import (
     verify_password,
 )
 from app.models.enums import AuthProvider, UserRole
-from app.models.user import PasswordResetToken, RefreshToken, User
+from app.models.user import EmailVerificationToken, PasswordResetToken, RefreshToken, User
 from app.repositories.user import (
+    EmailVerificationTokenRepository,
     PasswordResetTokenRepository,
     RefreshTokenRepository,
     UserRepository,
 )
 from app.schemas.auth import RegisterRequest, TokenPair
+from app.schemas.user import UserUpdateRequest
 from app.services.email import EmailProvider
 from app.services.oauth import GoogleUserInfo
 
@@ -48,10 +50,13 @@ class AuthService:
         self._users = UserRepository(session)
         self._refresh_tokens = RefreshTokenRepository(session)
         self._reset_tokens = PasswordResetTokenRepository(session)
+        self._verification_tokens = EmailVerificationTokenRepository(session)
 
     # --- Registration ----------------------------------------------------
 
-    async def register(self, data: RegisterRequest) -> tuple[User, TokenPair]:
+    async def register(
+        self, data: RegisterRequest, *, email_provider: EmailProvider
+    ) -> tuple[User, TokenPair]:
         email = data.email.strip().lower()
         if await self._users.get_by_email(email) is not None:
             raise ConflictError("an account with this email already exists")
@@ -66,11 +71,28 @@ class AuthService:
         await self._users.add(user)
         token_pair = await self._issue_token_pair(user)
 
+        # Every local registration gets a verification token up front —
+        # there's no separate "request verification" step to originate one
+        # from, matching how request_password_reset originates its own
+        # token rather than requiring a prior step.
+        raw_verification_token = generate_opaque_token()
+        verification_row = EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_token(raw_verification_token),
+            expires_at=datetime.now(UTC)
+            + timedelta(minutes=self._settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES),
+        )
+        await self._verification_tokens.add(verification_row)
+
         try:
             await self._session.commit()
         except IntegrityError as exc:
             await self._session.rollback()
             raise ConflictError("an account with this email already exists") from exc
+
+        await email_provider.send_verification_email(
+            to=user.email, verification_token=raw_verification_token
+        )
 
         return user, token_pair
 
@@ -233,6 +255,70 @@ class AuthService:
         if token is None or token.used_at is not None:
             return False
         return token.expires_at >= datetime.now(UTC)
+
+    # --- Email verification --------------------------------------------------
+
+    async def verify_email(self, *, token: str) -> User:
+        # FOR UPDATE: same race as confirm_password_reset — without the
+        # lock, two concurrent verify calls with the same token could both
+        # read used_at IS NULL and both succeed.
+        stored = await self._verification_tokens.get_by_token_hash_for_update(hash_token(token))
+        if not self._verification_token_usable(stored):
+            raise UnauthorizedError("invalid or expired verification token")
+
+        user = await self._session.get(User, stored.user_id)
+        if user is None or not user.is_active:
+            raise UnauthorizedError("invalid or expired verification token")
+
+        user.is_verified = True
+        await self._verification_tokens.mark_used(stored)
+        await self._session.commit()
+        return user
+
+    @staticmethod
+    def _verification_token_usable(token: EmailVerificationToken | None) -> bool:
+        if token is None or token.used_at is not None:
+            return False
+        return token.expires_at >= datetime.now(UTC)
+
+    async def resend_verification_email(self, *, user: User, email_provider: EmailProvider) -> None:
+        """Only reachable path back to a working /verify-email link once
+        the one issued at registration has expired or been lost — without
+        this, an expired token would be a permanent dead end. Mirrors
+        register()'s own token-issuance block exactly; doesn't invalidate
+        any still-outstanding token (request_password_reset doesn't
+        either — multiple valid tokens coexisting harmlessly is the
+        established convention here, not a gap).
+        """
+        if user.is_verified:
+            return
+
+        raw_verification_token = generate_opaque_token()
+        verification_row = EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hash_token(raw_verification_token),
+            expires_at=datetime.now(UTC)
+            + timedelta(minutes=self._settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES),
+        )
+        await self._verification_tokens.add(verification_row)
+        await self._session.commit()
+
+        await email_provider.send_verification_email(
+            to=user.email, verification_token=raw_verification_token
+        )
+
+    # --- Profile -------------------------------------------------------------
+
+    async def update_profile(self, *, user: User, data: UserUpdateRequest) -> User:
+        # See UserUpdateRequest's docstring: None (omitted or explicit
+        # null) leaves a field untouched, only a non-blank string updates
+        # it — a request with neither field set is a harmless no-op commit.
+        if data.full_name is not None:
+            user.full_name = data.full_name
+        if data.avatar_url is not None:
+            user.avatar_url = data.avatar_url
+        await self._session.commit()
+        return user
 
     async def _revoke_all_refresh_tokens(self, user_id: uuid.UUID) -> None:
         result = await self._session.execute(

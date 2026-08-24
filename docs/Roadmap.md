@@ -1,12 +1,14 @@
 # InterviewIQ AI — Build Roadmap
 
-Status: **Module 1 (this document) in progress**
+Status: **Modules 1–8 complete (backend); Module 9 (Hardening & Deployment) next**
+
+**Frontend note** (updated at Module 8): `frontend/` remains an empty directory — no React work has been built for any module, despite Modules 1, 2, 4, and 8 each originally listing frontend deliverables below. Every module actually shipped so far is backend + tests only, a deliberate scope decision reconfirmed at Module 8. This is a real, accumulating product gap (there is currently no UI for a candidate to use any of this) — flagged here explicitly rather than silently carried forward again. A dedicated frontend build is not yet scheduled as its own module.
 
 We build exactly one module at a time. Each module below has an explicit exit criteria — implementation does not move to the next module until the current one is reviewed and approved. This is the operating rule for the whole project, not just a suggestion.
 
 ---
 
-## Module 1 — Foundation (current)
+## Module 1 — Foundation
 
 **Goal:** lock the architecture, schema, and scope before any application code exists.
 
@@ -16,9 +18,9 @@ We build exactly one module at a time. Each module below has an explicit exit cr
 - [x] [Features.md](Features.md) — MVP vs. later scope per module
 - [x] [API.md](API.md) — REST surface for MVP scope
 - [x] Final cross-doc consistency review
-- [ ] Repo scaffolding: `backend/` FastAPI skeleton + `frontend/` React skeleton matching Architecture.md §3, `docker-compose.yml` for Postgres/Redis/ChromaDB/backend/frontend, Alembic initialized against the Database.md schema
+- [x] Repo scaffolding: `backend/` FastAPI skeleton, `docker-compose.yml` for Postgres/Redis/ChromaDB/backend, Alembic initialized against the Database.md schema — `frontend/` scaffolding not done (see the frontend note above)
 
-**Exit criteria:** `docker-compose up` brings up an empty-but-wired stack (FastAPI health endpoint reachable, DB migrated, frontend renders a placeholder page). No feature logic yet.
+**Exit criteria:** `docker-compose up` brings up an empty-but-wired stack (FastAPI health endpoint reachable, DB migrated). No feature logic yet.
 
 ---
 
@@ -103,9 +105,11 @@ We build exactly one module at a time. Each module below has an explicit exit cr
 **Scope:** [Features.md](Features.md) §9, MVP rows.
 
 - `skill_progress`, `company_readiness`, `user_progress_snapshots` populated on report generation
-- Dashboard endpoints from API.md §7 + frontend views (history, skill trends, company readiness)
+- Dashboard endpoints from API.md §7 — **backend only**, no frontend views (see the frontend note at the top of this document; confirmed with the project owner at planning time rather than silently deferred)
+- No new agent/LLM provider — every number here is a deterministic aggregate of, or a direct read from, Module 7's already-scored data; `ProgressService.record_session_progress` runs synchronously inside Module 7's existing `generate_report_job`, not a background job of its own
+- One small additive migration closing a genuine Module 7 gap found during planning: `report_weak_areas`/`report_strong_areas` gained a nullable `section` column (which of the five report sections a topic belongs to — known at generation time but never persisted until now) so skill_progress can score a topic against the correct section instead of guessing
 
-**Exit criteria:** after 2+ completed sessions, the dashboard shows a real trend, not placeholder data.
+**Exit criteria:** after 2+ completed sessions, the dashboard shows a real trend, not placeholder data. See backend/README.md's "Progress Dashboard (Module 8)" section for the full writeup, including what was live-verified against the real running stack.
 
 ---
 
