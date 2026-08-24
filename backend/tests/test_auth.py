@@ -3,7 +3,8 @@ authorization, logout, password reset, and targeted security properties.
 """
 
 import asyncio
-from datetime import timedelta
+import uuid
+from datetime import UTC, datetime, timedelta
 from unittest import mock
 
 import pytest
@@ -13,11 +14,11 @@ from sqlalchemy import select
 from app.api.deps import get_google_oauth_provider, require_role
 from app.core.config import get_settings
 from app.core.exceptions import ForbiddenError, UnauthorizedError
-from app.core.security import TokenType, _create_token, decode_token
+from app.core.security import TokenType, _create_token, decode_token, hash_token
 from app.db.session import get_session_factory
 from app.main import app
 from app.models.enums import UserRole
-from app.models.user import PasswordResetToken, RefreshToken, User
+from app.models.user import EmailVerificationToken, PasswordResetToken, RefreshToken, User
 from app.services.auth_service import AuthService
 from app.services.oauth import GoogleUserInfo
 
@@ -481,6 +482,118 @@ async def test_password_reset_revokes_existing_refresh_sessions(
     assert response.status_code == 401
 
 
+# --- Email verification -----------------------------------------------------
+
+
+async def test_register_generates_and_sends_a_verification_token(
+    client: AsyncClient, fake_email_provider
+) -> None:
+    await _register(client)
+
+    assert len(fake_email_provider.sent_verifications) == 1
+    to, verification_token = fake_email_provider.sent_verifications[0]
+    assert to == "ada@example.com"
+    assert verification_token
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(select(EmailVerificationToken))
+        row = result.scalar_one()
+        assert row.token_hash == hash_token(verification_token)
+        assert row.used_at is None
+
+
+async def test_verify_email_success(client: AsyncClient, fake_email_provider) -> None:
+    register_response = await _register(client)
+    assert register_response.json()["user"]["is_verified"] is False
+    _, verification_token = fake_email_provider.sent_verifications[0]
+
+    response = await client.post("/api/v1/auth/verify-email", json={"token": verification_token})
+    assert response.status_code == 200
+    assert response.json()["is_verified"] is True
+
+    # Persisted, not just echoed back — confirmed independently via login.
+    login = await client.post(
+        "/api/v1/auth/login", json={"email": "ada@example.com", "password": VALID_PASSWORD}
+    )
+    assert login.json()["user"]["is_verified"] is True
+
+
+async def test_verify_email_invalid_token(client: AsyncClient) -> None:
+    response = await client.post("/api/v1/auth/verify-email", json={"token": "not-a-real-token"})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+async def test_verify_email_token_is_single_use(client: AsyncClient, fake_email_provider) -> None:
+    await _register(client)
+    _, verification_token = fake_email_provider.sent_verifications[0]
+
+    first = await client.post("/api/v1/auth/verify-email", json={"token": verification_token})
+    assert first.status_code == 200
+
+    second = await client.post("/api/v1/auth/verify-email", json={"token": verification_token})
+    assert second.status_code == 401
+
+
+async def test_verify_email_expired_token(client: AsyncClient, fake_email_provider) -> None:
+    await _register(client)
+    _, verification_token = fake_email_provider.sent_verifications[0]
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            select(EmailVerificationToken).where(
+                EmailVerificationToken.token_hash == hash_token(verification_token)
+            )
+        )
+        row = result.scalar_one()
+        row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        await session.commit()
+
+    response = await client.post("/api/v1/auth/verify-email", json={"token": verification_token})
+    assert response.status_code == 401
+
+
+async def test_resend_verification_sends_a_new_token(
+    client: AsyncClient, fake_email_provider
+) -> None:
+    tokens = (await _register(client)).json()
+    assert len(fake_email_provider.sent_verifications) == 1
+
+    response = await client.post(
+        "/api/v1/auth/resend-verification",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 202
+    assert len(fake_email_provider.sent_verifications) == 2
+
+    _, second_token = fake_email_provider.sent_verifications[1]
+    verify = await client.post("/api/v1/auth/verify-email", json={"token": second_token})
+    assert verify.status_code == 200
+    assert verify.json()["is_verified"] is True
+
+
+async def test_resend_verification_requires_authentication(client: AsyncClient) -> None:
+    response = await client.post("/api/v1/auth/resend-verification")
+    assert response.status_code == 401
+
+
+async def test_resend_verification_is_a_noop_once_already_verified(
+    client: AsyncClient, fake_email_provider
+) -> None:
+    tokens = (await _register(client)).json()
+    _, verification_token = fake_email_provider.sent_verifications[0]
+    await client.post("/api/v1/auth/verify-email", json={"token": verification_token})
+
+    response = await client.post(
+        "/api/v1/auth/resend-verification",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 202
+    assert len(fake_email_provider.sent_verifications) == 1
+
+
 # --- Google OAuth boundary -------------------------------------------------
 
 
@@ -596,3 +709,116 @@ async def test_password_hash_uses_argon2(client: AsyncClient) -> None:
         result = await session.execute(select(User).where(User.email == "ada@example.com"))
         user = result.scalar_one()
         assert user.password_hash.startswith("$argon2")
+
+
+# --- Profile update (PATCH /users/me) --------------------------------------
+
+
+async def test_update_profile_full_name_success(client: AsyncClient) -> None:
+    tokens = (await _register(client)).json()
+
+    response = await client.patch(
+        "/api/v1/users/me",
+        json={"full_name": "Ada Byron"},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["full_name"] == "Ada Byron"
+
+    me = await client.get(
+        "/api/v1/users/me", headers={"Authorization": f"Bearer {tokens['access_token']}"}
+    )
+    assert me.json()["full_name"] == "Ada Byron"
+
+
+async def test_update_profile_avatar_url_success(client: AsyncClient) -> None:
+    tokens = (await _register(client)).json()
+
+    response = await client.patch(
+        "/api/v1/users/me",
+        json={"avatar_url": "https://example.com/avatar.png"},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["avatar_url"] == "https://example.com/avatar.png"
+
+
+async def test_update_profile_partial_update_leaves_other_field_untouched(
+    client: AsyncClient,
+) -> None:
+    tokens = (await _register(client)).json()
+
+    await client.patch(
+        "/api/v1/users/me",
+        json={"avatar_url": "https://example.com/avatar.png"},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    response = await client.patch(
+        "/api/v1/users/me",
+        json={"full_name": "Ada Byron"},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 200
+    assert response.json()["full_name"] == "Ada Byron"
+    assert response.json()["avatar_url"] == "https://example.com/avatar.png"
+
+
+async def test_update_profile_requires_authentication(client: AsyncClient) -> None:
+    response = await client.patch("/api/v1/users/me", json={"full_name": "Ada Byron"})
+    assert response.status_code == 401
+
+
+async def test_update_profile_rejects_blank_name(client: AsyncClient) -> None:
+    tokens = (await _register(client)).json()
+
+    response = await client.patch(
+        "/api/v1/users/me",
+        json={"full_name": "   "},
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+async def test_update_profile_ignores_protected_fields(client: AsyncClient) -> None:
+    """role/id/is_verified/etc. aren't in UserUpdateRequest's shape at
+    all, so pydantic's default extra="ignore" silently drops them —
+    there's no attack surface here to reject explicitly, just confirming
+    the intended-inert behavior.
+    """
+    tokens = (await _register(client)).json()
+
+    response = await client.patch(
+        "/api/v1/users/me",
+        json={
+            "full_name": "Ada Byron",
+            "role": "admin",
+            "is_verified": True,
+            "id": str(uuid.uuid4()),
+        },
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["full_name"] == "Ada Byron"
+    assert body["role"] == "candidate"
+    assert body["is_verified"] is False
+
+
+async def test_update_profile_only_updates_callers_own_record(client: AsyncClient) -> None:
+    tokens_a = (await _register(client, email="ada@example.com")).json()
+    tokens_b = (await _register(client, email="grace@example.com")).json()
+
+    await client.patch(
+        "/api/v1/users/me",
+        json={"full_name": "Ada Byron"},
+        headers={"Authorization": f"Bearer {tokens_a['access_token']}"},
+    )
+
+    # _register always sends first_name="Ada"/last_name="Lovelace" — the
+    # point here isn't the exact unchanged value, just that user B's own
+    # record was never touched by user A's PATCH.
+    me_b = await client.get(
+        "/api/v1/users/me", headers={"Authorization": f"Bearer {tokens_b['access_token']}"}
+    )
+    assert me_b.json()["full_name"] == "Ada Lovelace"

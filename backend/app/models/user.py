@@ -35,6 +35,9 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class RefreshToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
@@ -67,3 +70,24 @@ class PasswordResetToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="password_reset_tokens")
+
+
+class EmailVerificationToken(Base, UUIDPrimaryKeyMixin, CreatedAtMixin):
+    """Not in Database.md's original Module 1 schema — added alongside the
+    frontend auth stage for the email-verification flow (Features.md's
+    MVP list). Deliberately mirrors PasswordResetToken's shape exactly
+    (same single-use-opaque-token design, same hashed-at-rest storage):
+    only the code path differs (registration issues it, /auth/verify-email
+    consumes it), not the token mechanics.
+    """
+
+    __tablename__ = "email_verification_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship(back_populates="email_verification_tokens")

@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens (frontend plan's "Visual/UX design system" section).
+ * No project doc specifies a brand palette — Architecture.md names only
+ * the stack (React/Tailwind/Monaco/Zustand), not a look — so this is a
+ * deliberate, professional default (a single indigo accent over
+ * Tailwind's built-in slate neutrals), not an invented "brand identity."
+ * Light-first, with the color-scheme declared so the browser's own UI
+ * (scrollbars, form controls) already respects a user's OS dark
+ * preference even before an explicit in-app toggle exists (a toggle
+ * itself is Stage 9 polish, not Stage 1 foundation).
+ *
+ * `--color-brand-*` lives inside @theme so Tailwind generates real
+ * utilities from it (bg-brand-600, text-brand-600, ...) — the same way
+ * as any of Tailwind's own built-in palettes, not a one-off CSS variable
+ * every component has to reach for via an arbitrary-value class.
+ */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, "Cascadia Code", "Source Code Pro", Menlo, Consolas,
+    monospace;
+
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #e0e7ff;
+  --color-brand-200: #c7d2fe;
+  --color-brand-300: #a5b4fc;
+  --color-brand-400: #818cf8;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+  --color-brand-800: #3730a3;
+  --color-brand-900: #312e81;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}

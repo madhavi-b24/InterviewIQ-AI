@@ -746,6 +746,101 @@ Features.md's original MVP language list said "Python + JavaScript"; this module
 - Memory-limit violations are not distinguished from other abnormal-signal process terminations — both surface as `runtime_error`, not a separate `memory_limit` status, because the MVP sandbox's exit-code signal alone can't reliably tell an OOM kill apart from any other crash. `CodeExecutionStatus.MEMORY_LIMIT` exists in the enum for a future sandbox that reports this distinctly; nothing produces it today. An honest limitation, not a silently-wrong classification.
 - The Redis `submission:{id}:status` cache described in Database.md §9 was not implemented, same reasoning as Module 5's `session:{id}:hot_state` — polling reads Postgres directly.
 
+## Report Generation & Learning Roadmap (Module 7)
+
+### Architecture
+
+```
+GET .../report, GET /reports/{id}/roadmap, PATCH /roadmap-items/{id}
+  → app/api/v1/reports.py (thin — parses request, calls one ReportService
+    method, shapes response)
+    → ReportService (app/services/report/report_service.py) — reads,
+      never generates
+
+generate_report_job (app/jobs/report_generation.py) — the ONLY place a
+report is produced, triggered two ways:
+  → app/api/v1/interviews.py's submit_answer handler (a live request,
+    real BackgroundTasks) — enqueues normally via JobRunner
+  → app/jobs/coding_execution.py's run_code_submission_job (already a
+    background task, no live BackgroundTasks to enqueue onto, no
+    persistent queue exists yet — Module 9) — calls the function directly
+    by await instead. Same function either way, own DB session, own
+    providers, one commit.
+      → app/agents/policy.py — every score (section scores, overall
+        score, weak-area severity) computed deterministically here
+      → ReportGenerationProvider (app/services/report_generation/) —
+        ONE Gemini structured-output call for every explanation/
+        narrative/roadmap-resource field — never a score
+```
+
+Deliberately **outside** the LangGraph turn loop — the same architectural split Module 6 makes for Run/Submit. Report generation is a one-shot post-session aggregation with no back-and-forth; nothing about it needs the Supervisor's turn-taking machinery, and it would be a category error to model it as a graph node.
+
+### Score ownership
+
+Every number in a report is computed in Python, never asked of Gemini — the same "don't let the model pick the headline number" rule Module 5's difficulty policy and Module 6's `overall_code_score` already established:
+
+- `report_section_scores.score` — plain average of that dimension's score across every contributing `AnswerEvaluation`/`CodingEvaluation` row (`compute_section_score`).
+- `interview_reports.overall_score` — weighted average of per-round composite scores, weighted by `interview_rounds.weight` — the same snapshotted round weight Module 4's plan snapshot already carries (`compute_round_composite` + `compute_overall_score`).
+- `report_weak_areas.severity` — deterministic score-threshold bucketing (`classify_weak_area_severity`) — Gemini identifies *which* topics are weak and writes the evidence narrative, but how severe a given weak area is comes from the score that made it a candidate weak area in the first place, never a model guess.
+
+`ReportGenerationProvider.generate(...)` receives only primitives — computed section/overall scores plus per-answer explanation strings Module 5/6's evaluators already produced — never ORM rows, never raw transcript, never chain-of-thought.
+
+### Idempotency
+
+`InterviewReport.session_id` is unique (Module 1 baseline) — `ReportService.generate_report_for_session` pre-checks for an existing report and returns it unchanged if found, and the eventual commit is wrapped in the same `IntegrityError → rollback → requery → return-existing` pattern Module 6's `CodingRoundService.create_submission` already established for a genuine race. Report generation is **single-shot, not two-phase** — unlike Module 6's Run/Submit, there's no user-facing "queued" state to protect ahead of the Gemini call, since `SessionStatus.COMPLETED` is already durably committed before this job even starts. So: compute every score, call Gemini once, and only then issue one atomic `add`+`commit` of the whole report graph (report → section_scores/weak_areas/strong_areas/roadmap→items, via the models' own `cascade="all, delete-orphan"` relationships). A failure at any point before that commit — a Gemini timeout, a DB error — leaves **zero** rows written; the job logs and stops, the same "no retry, log and stop" pattern `coding_execution.py`/`resume_processing.py` already use for job failures. `GET .../report` surfaces this as a distinct `REPORT_NOT_YET_AVAILABLE` 404, not a synchronous fallback generation (that would reintroduce inline-Gemini-blocking on the answer/submission request path).
+
+### Known limitations
+
+- If `record_session_progress`/round-advancement succeeds but the report-generation job itself then fails (Gemini timeout/error, DB error), the interview stays `COMPLETED` with no report and no automatic retry — a candidate would need a manual re-trigger. No retry/backoff exists anywhere in the job layer yet (Module 9's Celery work is the eventual real fix).
+- Roadmap resource URLs (`roadmap_items.resource_url`) are Gemini-authored strings, never validated as real, reachable URLs.
+
+## Progress Dashboard (Module 8)
+
+### Architecture
+
+```
+GET /dashboard/overview, /skills, /company-readiness, /history
+  → app/api/v1/dashboard.py (thin — parses request, calls one
+    ProgressService method, shapes response)
+    → ProgressService (app/services/progress/progress_service.py) —
+      reads, never writes
+
+ProgressService.record_session_progress — the ONLY place progress state
+is written, called from inside app/jobs/report_generation.py's
+generate_report_job, right after a real report commits, in the SAME
+session/transaction — no background job of its own (unlike every module
+since 5): this is fast, deterministic DB aggregation, nothing slow or
+fallible to schedule separately.
+```
+
+No new agent, no new LLM provider package — the first module in the project that's pure deterministic aggregation over data Modules 5–7 already produced. `skill_progress`/`company_readiness`/`user_progress_snapshots` were all modeled ahead of time (Module 1 baseline); this module is the first to actually write to them.
+
+### Data flow
+
+- **`user_progress_snapshots`** — upserted keyed on `(user_id, today's date)`: `interviews_completed`/`avg_overall_score` recomputed fresh from every `interview_reports` row belonging to the user's `COMPLETED` sessions (not incrementally accumulated — always a full, correct recomputation).
+- **`company_readiness`** — upserted keyed on `(user_id, company_id)`, only when the just-completed session's `InterviewSession.company_id` is not null: `readiness_score` = that session's `overall_score`, `last_interview_session_id` updated to match — "most recent session's score," matching the schema's single-FK shape (no rolling-average column exists here, unlike snapshots).
+- **`skill_progress`** — one row per normalized skill name, upserted keyed on `(user_id, skill_name)`: for every `ReportWeakArea`/`ReportStrongArea` on the report, the topic is normalized via the *existing* `app/services/resume/skill_normalization.py::normalize_skill` (Module 3, reused rather than duplicated — a general-purpose alias-table lookup, not resume-specific despite its package location) to get a canonical skill name, then scored against the *correct* `report_section_scores` value for that topic's section.
+
+That last step needed a genuine, small addition to Module 7: `ReportWeakArea`/`ReportStrongArea` knew which report section a topic belonged to at generation time (it's the same signal `classify_weak_area_severity` already used) but never wrote it down. One additive migration (`b8b88e60fad8`) added a nullable `section` column to both tables, populated going forward by `ReportService._build_report` — a one-line addition there, plus giving `StrongAreaContent` (the Gemini output schema) a `section` field it didn't have before (only `WeakAreaContent` did). Rows from before this migration simply have `section=NULL`; `ProgressService` skips those rather than guessing — a self-resolving gap, since every report generated after the migration has it.
+
+### Trend classification
+
+`app/agents/policy.py::classify_score_trend(delta)` — a plain-average delta against the row being overwritten, bucketed into `improving`/`stable`/`declining` with a ±5.0 dead zone (the same anti-oscillation reasoning `compute_difficulty_signal`'s own dead zone already uses, applied to trend direction instead of difficulty). A skill's first-ever assessment has no prior row to compare against and gets `stable` as an explicit baseline, never a fabricated `improving` or a crash.
+
+### Idempotency
+
+Every write here is read-existing-row-then-upsert, never a blind insert — re-running for the same session recomputes the same correct state rather than duplicating anything (verified directly: re-invoking `generate_report_job` for an already-processed session leaves `user_progress_snapshots`/`skill_progress` row counts unchanged). Each of the three tables' own unique constraint (Module 1 baseline) is the real concurrency backstop for a genuine race — `record_session_progress` retries the whole batch once on `IntegrityError` after a rollback, rather than a bespoke per-table merge, since every write is cheap and deterministic enough that a clean retry always converges to the same result. Wrapped in its own `try`/`except` inside the job: a progress-recording bug must never retroactively void an already-correct, already-committed report.
+
+### Frontend
+
+**None, deliberately** — confirmed with the project owner during Module 8 planning rather than silently deferred. `frontend/` remains empty; every module built so far (2 through 8) is backend + tests only, despite the original Roadmap.md scope for Modules 2/4/8 each mentioning frontend work. See Roadmap.md's frontend note at the top of that document.
+
+### Known limitations
+
+- `GET /dashboard/history` is the first genuinely paginated endpoint in the project — plain `limit`/`offset` query params (default 20, max 100), no cursor pagination, since nothing else in the codebase had an existing convention to extend.
+- `report_weak_areas`/`report_strong_areas.section` is nullable and only populated going forward — a dashboard reflecting reports generated before Module 8 landed will under-count skills from those older reports specifically (their topics are simply skipped, not mis-scored).
+- `skill_progress`/`company_readiness` are upsert-only, no history table — only the single latest value and its most-recent-vs-previous trend are ever visible per skill/company, never a full time series (that's what `user_progress_snapshots` is for at the whole-session level, not per-skill).
+
 ## Manually verifying authentication with Swagger
 
 1. `docker compose up -d` from the repo root (or `uv run uvicorn app.main:app --reload` from `backend/`).
@@ -819,6 +914,26 @@ Requires the full stack including `executor` (`docker compose up -d` from the re
 13. **Unsupported language check**: repeat step 4 with `"language": "ruby"` → expect `422 UNSUPPORTED_LANGUAGE`.
 
 Without a running `executor` container (and `CODE_EXECUTION_BACKEND` left at its default `docker_sandbox`), step 4/7 still return `202` (the job is enqueued regardless), but polling in step 5/8 will show `execution_status: "error"` with `error_message` describing the connection failure, and `is_final` will have been released back to `false` for the step-7 case — matching the documented infra-failure behavior, not a crash.
+
+## Manually verifying Report Generation & Roadmap with Swagger
+
+Requires a completed session — the fastest path is a "Coding Practice" interview submitted final (see the Coding Round steps above).
+
+1. Complete a session (any template). Once `GET /interview-sessions/{id}` shows `status: "completed"`, poll `GET /interview-sessions/{id}/report` → Execute — expect `404 REPORT_NOT_YET_AVAILABLE` briefly, then `200` once the background job finishes (synchronous under the dev server's own request-response cycle in practice, but always poll for real deployments). Confirm `sections` only has keys for dimensions the session actually produced (no `coding` key for a text-only session), every section has both a `score` and non-empty `explanation`, and `weak_areas`/`strong_areas` cite specific topics, not generic labels. Copy the report's `id`.
+2. `GET /reports/{report_id}/roadmap` → Execute. Expect `items` — zero if the report had no weak areas, otherwise one or more with a real `resource_title`/`resource_type`/`priority`.
+3. `PATCH /roadmap-items/{item_id}` → body `{"is_completed": true}` → Execute. Expect `200` with `is_completed: true`; repeat with the same value — expect the same `200`, not an error (idempotent).
+4. **Ownership check**: register a second account, Authorize with its token, repeat steps 1–3 against the first account's `interview_id`/`report_id`/`item_id` → expect `404` on all three.
+
+## Manually verifying the Progress Dashboard with Swagger
+
+Requires 2+ completed sessions for a real trend, per the module's own exit criteria.
+
+1. Complete two sessions for the same account (any templates that reach `status: "completed"` and generate a report). `GET /dashboard/overview` → Execute. Expect `interviews_completed: 2` and a real `avg_overall_score` — not `0`/placeholder unless both sessions genuinely scored `0`.
+2. `GET /dashboard/skills` → Execute. Expect one row per normalized skill topic surfaced across both sessions' weak/strong areas, each with a `proficiency_score` and a `trend` — `stable` on a skill's first appearance, `improving`/`declining` if the same skill appeared in both sessions with a real score delta.
+3. `GET /dashboard/company-readiness` → Execute. Expect an entry only if at least one completed session used a company-specific template (a `company_id`-agnostic template like "Coding Practice" contributes nothing here) — confirm `company_name` is populated, not just a bare `company_id`.
+4. `GET /dashboard/history?limit=1&offset=0` → Execute. Expect `total: 2`, exactly one item, most-recent session first, with a linked `report` summary. Repeat with `offset=1` — expect the other session, no overlap.
+5. **Empty-state check**: register a fresh account with zero sessions, Authorize with its token, repeat steps 1–4 → expect `200` everywhere with `interviews_completed: 0`, `avg_overall_score: 0.0`, `trend: "stable"`, and empty lists/`total: 0` — never a `500`.
+6. **Ownership check**: repeat steps 1–4 with a second account's token against data belonging to the first → expect the second account's own (empty or unrelated) data back, never the first account's.
 
 ## What was actually verified, not just written (Module 2)
 
@@ -943,6 +1058,32 @@ Every piece of this milestone was run, not just authored — including against t
 - Grepped the full `docker compose logs backend`/`docker compose logs executor` output from this entire live session (144 + 1373 lines) for passwords, bearer tokens, the configured Gemini API key, and — specifically for this module — every submitted candidate source code snippet's own distinctive substrings (e.g. `seen[target-v]`, the network-probe's `8.8.8.8`) — no matches anywhere in either log stream.
 - **What was reviewed by code inspection but not independently live-tested**: path-traversal resistance via the `id`/language-config fields (reviewed — `source_filename` always comes from the fixed `LANGUAGE_CONFIGS` dict, never candidate input; the `id` field is only ever used as a dict key for matching results, never to construct a filesystem path — no live adversarial-path-traversal test was run against it specifically, since there's no code path that turns any request field into a path in the first place). `cap_drop: [ALL]`'s effect was not probed with a specific "try a privileged syscall" test beyond the non-root/setuid checks already covered above.
 
+## What was actually verified, not just written (Module 7)
+
+- New migration (report/roadmap tables) — **none needed**: all six report/roadmap tables (`InterviewReport`, `ReportSectionScore`, `ReportWeakArea`, `ReportStrongArea`, `LearningRoadmap`, `RoadmapItem`) already existed as fully-fielded ORM models from the Module 1 baseline, confirmed matching Database.md §7 exactly before writing a line of Module 7 code — `alembic check` reported "no new upgrade operations detected" both before and after implementation.
+- `ruff check .` and `black --check .` — clean across every new/changed file.
+- **Full suite — 192 passed, 0 failed** (178 fake-based across Modules 1–7, including 19 new Module 7 tests, + 14 real-sandbox security tests unaffected by Module 7's changes), confirming zero regression to auth/resume/planning/interview-execution/coding-round alongside full report/roadmap coverage — deterministic score aggregation, weighted overall score, coding-score aggregation, every score having a paired explanation, weak/strong-area and roadmap generation, fake-provider behavior, completed-session integration (both text-only and coding-round sessions), the three API endpoints, ownership, idempotent repeated generation, and failure-then-successful-retry behavior of the background job.
+- **Live end-to-end smoke test, real Postgres, real sandbox execution, and real Gemini API against the full running `docker compose` stack** (`REPORT_GENERATION_PROVIDER=gemini`/`CODE_EVALUATION_PROVIDER=gemini`, the actual production defaults):
+  - First attempt genuinely failed and taught something real about the architecture, not a bug: the smoke-test script checked `GET /interview-sessions/{id}` for `status: "completed"` immediately after the grading submission's own poll returned a terminal status — but round-advancement and report generation happen as later steps *within the same background job*, and a real deployment (unlike the test suite's synchronous `ASGITransport`) gives no guarantee those later steps have finished by the time a separate, subsequent request arrives. Fixed by polling interview status too, not just the submission — confirmed via `docker compose logs backend` that `coding.job.round_advanced` → `report.generate.completed` → `report.job.completed` had in fact all already fired successfully for that exact interview, moments before the premature check.
+  - Corrected smoke test: planned + started a "Coding Practice" interview → submitted a final (deliberately wrong, 0/2 sample tests) solution → confirmed via logs the full job chain completed → polled `GET .../report` until available → got back a **real Gemini-authored** report: `overall_score: 0.0` (correctly computed, not guessed — the candidate's submission genuinely passed nothing), a coherent narrative citing the actual 0/2 result, `coding` as the only populated section (matching the single-round template), and zero fabricated strong areas.
+  - `GET /reports/{id}/roadmap` returned real, well-formed learning resources; `PATCH /roadmap-items/{id}` updated `is_completed` correctly.
+- Dev-database catalog reseed needed before the live run (`uv run python -m app.db.seed_catalog`) — the same expected, already-documented situation Module 6 hit for its own new table, not a new issue.
+
+## What was actually verified, not just written (Module 8)
+
+- New migration (`b8b88e60fad8`, additive nullable `section` column on `report_weak_areas`/`report_strong_areas`) — autogenerated, hand-adjusted to match this chain's established pattern (explicit `CREATE TYPE`/`DROP TYPE` for the two new Postgres enums, since `add_column` doesn't create one implicitly the way `create_table` does), round-tripped `upgrade → downgrade -1 → upgrade head` and `alembic check` (no drift) on **both** `interviewiq` and `interviewiq_test`.
+- `ruff check .` and `black --check .` — clean across every new/changed file.
+- `pytest tests/test_progress_dashboard.py` — **16 passed, 0 failed**, covering deterministic trend classification (all three threshold boundaries), first-completed-interview progress state, an incomplete/never-submitted session correctly producing *no* progress state, a second completed interview correctly updating (not duplicating) the snapshot, idempotent repeated report-generation, weak-area-to-skill-progress mapping with correct section-scoped scores, a genuine score-delta producing a real `improving` trend across two sessions, company-readiness recording and its "most recent session wins" update semantics, dashboard endpoint authentication/ownership, the empty-state response before any completed session, and history pagination (no overlap or gap across pages).
+  - **Found and fixed one real test-fixture bug, not an application bug**: the company-readiness tests initially omitted `company_id` from the interview-plan request body when planning a company-specific template, hitting a genuine, correct `422 TEMPLATE_COMPANY_MISMATCH` from the existing (unmodified) Module 4 validation — not a Module 8 defect. Fixed the test helper to pass the role's own `company_id`, per `InterviewPlanRequest`'s existing schema.
+- **Full regression suite, single clean run — 194 passed, 0 failed** (Modules 1–8, fake-based) + **14 passed, 0 failed** (real-sandbox security, unaffected by Module 8) — **208 total**, confirming zero regression anywhere in Modules 1–7 from the one approved integration point in `app/jobs/report_generation.py`.
+  - One earlier full-suite run reported 193 passed / 1 failed (`test_planned_interview_starts`, pre-existing Module 5 test, untouched by Module 8) — traced to a **~2h53m real wall-clock stall mid-run** (the log timestamps showed the failing test's own access token issued at 11:46 but the request using it firing at 14:29), causing a genuine JWT expiration, not a code defect. Re-ran the single test in isolation (26/26 passed, ~97s, normal duration) and then the entire suite again end-to-end (194/194, single clean run, 527s) to confirm conclusively before reporting a final number.
+- **Live end-to-end smoke test, real Postgres, real sandbox execution, and real Gemini API against the full running `docker compose` stack** — completed two full "Coding Practice" interviews for one candidate (real sandbox, real Gemini report generation each time), then read back all four dashboard endpoints:
+  - `GET /dashboard/overview` after interview #1: `interviews_completed: 1`. After #2: `interviews_completed: 2` — the same snapshot row updated in place for the day, not a second row.
+  - `GET /dashboard/skills`: 5 real, Gemini-derived, correctly normalized skill names (e.g. "Coding Correctness", "Code Readability") each with a real `proficiency_score` and `trend`.
+  - `GET /dashboard/company-readiness`: correctly empty — "Coding Practice"'s role is company-agnostic.
+  - `GET /dashboard/history?limit=1`: correct pagination, `total: 2`, each item carrying its own linked report summary, no overlap between `offset=0` and `offset=1`.
+  - Dev-database catalog reseed needed before the run (same already-documented, expected situation as Modules 6 and 7).
+
 ## Explicitly not in this milestone
 
 **Module 2 (Authentication):** no `POST /auth/verify-email` or `PATCH /users/me` (not in the required endpoint list); no production email provider; Google OAuth needs real credentials to exercise end-to-end; no recruiter/admin endpoints yet (RBAC dependency exists and is tested, nothing depends on it yet — see Features.md, marked "Later").
@@ -951,6 +1092,10 @@ Every piece of this milestone was run, not just authored — including against t
 
 **Module 4 (Interview Planner):** no frontend. `/interview-sessions/{id}/start`/`/current-turn`/`/answers`/`/abandon` were out of scope at the time — **since implemented, see "Interview Engine (Module 5)" above.** No admin UI for companies/roles/templates (seed-file + CLI only, per Roadmap.md's stated scope). `resume_gap_analysis.target_role_id` remains unresolved (Module 3's gap-analysis endpoint still only accepts `role_key`). `roles`/`template_rounds` lack `created_at` (pre-existing Module 1 gap, not introduced or fixed here).
 
-**Module 5 (Interview Engine):** no frontend. Coding rounds/execution — **since implemented, see "Coding Round & Code Execution (Module 6)" above** (`RoundType.CODING` used to be cleanly skipped; it's real now). No Learning Agent, no Report Agent, no `interview_reports`/`learning_roadmaps` (Module 7) — `POST /answers`' `next.type: "session_complete"` deliberately omits a `report_id`, since nothing generates one yet. No real Knowledge Agent/RAG (deterministic grounding only — see "Known limitations" above). No Redis hot-state cache, no question-bank/knowledge-base ChromaDB collections. LangGraph's checkpointer is real and wired but not yet the thing providing turn-resume recovery (Postgres + idempotent retry is — see "Persistence vs. graph state" above); a future upgrade could exploit it for node-level resume granularity. No stress-tested concurrent-load verification (reviewed by design, exercised by idempotency tests, not load-tested). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+**Module 5 (Interview Engine):** no frontend. Coding rounds/execution — **since implemented, see "Coding Round & Code Execution (Module 6)" above** (`RoundType.CODING` used to be cleanly skipped; it's real now). Learning Agent, Report Agent, `interview_reports`/`learning_roadmaps` — **since implemented, see "Report Generation & Learning Roadmap (Module 7)" above**. No real Knowledge Agent/RAG (deterministic grounding only — see "Known limitations" above). No Redis hot-state cache, no question-bank/knowledge-base ChromaDB collections. LangGraph's checkpointer is real and wired but not yet the thing providing turn-resume recovery (Postgres + idempotent retry is — see "Persistence vs. graph state" above); a future upgrade could exploit it for node-level resume granularity. No stress-tested concurrent-load verification (reviewed by design, exercised by idempotency tests, not load-tested). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
 
-**Module 6 (Coding Round & Code Execution):** no frontend, no Monaco editor — this milestone is API-only, same as every prior one. No Judge0 backend (only `DockerSandboxExecutor`/`FakeCodeExecutor` exist — the `CodeExecutor` Protocol is designed for the swap, nothing depends on `DockerSandboxExecutor` specifically). No per-execution memory-usage reporting (`peak_memory_kb` stays `null` — the sandbox enforces a limit but doesn't measure usage). `MEMORY_LIMIT` as a distinct `execution_status` is not producible yet — an OOM kill and any other abnormal-signal crash both surface as `runtime_error` today (documented, not silently wrong — see "Known limitations" above). No Redis `submission:{id}:status` cache (same reasoning as Module 5's `session:{id}:hot_state`). No Report Agent integration yet — a coding round's `coding_evaluations` row exists and is fully populated, but nothing aggregates it into a report section score (Module 7). No Learning Agent tie-in from a weak coding performance. No stress-tested concurrent-load verification beyond the specific race the DB-constraint-backstop test exercises (reviewed by design, not load-tested under genuine parallel traffic). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+**Module 6 (Coding Round & Code Execution):** no frontend, no Monaco editor — this milestone is API-only, same as every prior one. No Judge0 backend (only `DockerSandboxExecutor`/`FakeCodeExecutor` exist — the `CodeExecutor` Protocol is designed for the swap, nothing depends on `DockerSandboxExecutor` specifically). No per-execution memory-usage reporting (`peak_memory_kb` stays `null` — the sandbox enforces a limit but doesn't measure usage). `MEMORY_LIMIT` as a distinct `execution_status` is not producible yet — an OOM kill and any other abnormal-signal crash both surface as `runtime_error` today (documented, not silently wrong — see "Known limitations" above). No Redis `submission:{id}:status` cache (same reasoning as Module 5's `session:{id}:hot_state`). Report Agent integration — **since implemented, see "Report Generation & Learning Roadmap (Module 7)" above**: a coding round's `coding_evaluations` row now genuinely feeds a report's `coding` section. No stress-tested concurrent-load verification beyond the specific race the DB-constraint-backstop test exercises (reviewed by design, not load-tested under genuine parallel traffic). See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+
+**Module 7 (Report Generation & Learning Roadmap):** no frontend. No PDF export or shareable report link (Features.md, both explicitly marked "Later" — the latter needs an access-control decision first). No agent self-critique/re-evaluation pass (also "Later", quality improvement not launch-blocking). No automatic retry if report generation fails after round-advancement succeeds (see "Known limitations" above) — a real gap, deliberately not fixed here since a retry mechanism would be new-feature scope, not a minimal integration fix. Progress Dashboard — **since implemented, see "Progress Dashboard (Module 8)" above**. See [../docs/Roadmap.md](../docs/Roadmap.md) for what comes next.
+
+**Module 8 (Progress Dashboard):** no frontend — a deliberate, confirmed-with-the-project-owner scope decision (see the module's own "Frontend" note above), not an oversight the way it was for Modules 2/4. Cohort/placement-cell aggregate analytics and a recruiter-facing candidate comparison view are both Features.md "Later" items (need an organization/cohort model not in the current schema, plus an access-control decision). No history of per-skill/per-company scores over time — only the single latest value and its most-recent-vs-previous trend (see "Known limitations" above; `user_progress_snapshots` is the only genuinely time-series table here). No stress-tested concurrent-load verification beyond the specific race the retry-once path is designed for (reviewed by design, not load-tested under genuine parallel traffic). This is the current end of the implemented roadmap — Module 9 (Hardening & Deployment) is next, see [../docs/Roadmap.md](../docs/Roadmap.md).

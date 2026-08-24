@@ -8,7 +8,7 @@ transitions").
 
 from typing import TYPE_CHECKING
 
-from app.models.enums import DifficultyLevel, DifficultySignal, RoundType, Severity
+from app.models.enums import DifficultyLevel, DifficultySignal, ProgressTrend, RoundType, Severity
 
 if TYPE_CHECKING:
     from app.agents.state import CodingProblemCandidate
@@ -243,3 +243,27 @@ def classify_weak_area_severity(score: float) -> Severity:
     if score <= _WEAK_AREA_MEDIUM_SEVERITY_MAX:
         return Severity.MEDIUM
     return Severity.LOW
+
+
+# --- Progress trend classification (Module 8) ---------------------------
+# skill_progress/user_progress_snapshots trends are computed here, not
+# guessed by anything upstream — same "deterministic Python, never an LLM
+# judgment call" rule every score in this file already follows.
+_SCORE_TREND_IMPROVE_DELTA = 5.0
+_SCORE_TREND_DECLINE_DELTA = -5.0
+
+
+def classify_score_trend(delta: float) -> ProgressTrend:
+    """delta = new_score - previous_score. A small move either way is
+    STABLE — the same anti-oscillation dead-zone reasoning
+    compute_difficulty_signal's threshold gap above already uses, applied
+    here to trend direction instead of difficulty. Callers with no prior
+    score to compare against (a skill's first-ever assessment) use
+    ProgressTrend.STABLE directly as the baseline rather than calling this
+    at all — there's no meaningful delta to classify yet.
+    """
+    if delta >= _SCORE_TREND_IMPROVE_DELTA:
+        return ProgressTrend.IMPROVING
+    if delta <= _SCORE_TREND_DECLINE_DELTA:
+        return ProgressTrend.DECLINING
+    return ProgressTrend.STABLE

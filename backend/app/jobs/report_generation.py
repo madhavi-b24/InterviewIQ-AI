@@ -22,6 +22,15 @@ established "log and stop" pattern for job failures. A failure here
 (ReportService.generate_report_for_session's own docstring covers why);
 GET /interview-sessions/{id}/report surfaces this as
 "REPORT_NOT_YET_AVAILABLE" rather than fabricating a partial report.
+
+Module 8's one approved integration point (Database.md §8:
+`user_progress_snapshots` is "written whenever a report is generated"):
+right after a real report is committed, ProgressService.record_session_progress
+runs in this *same* session/transaction — no separate job, no LLM call,
+just deterministic aggregation, so there's nothing here that needs its own
+background-task scheduling the way report generation itself did. Wrapped
+in its own try/except: a progress-recording bug must never retroactively
+void an already-correct, already-committed report.
 """
 
 import uuid
@@ -30,6 +39,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.db.session import get_session_factory
 from app.jobs.background_tasks_runner import JOB_HANDLERS
+from app.services.progress.progress_service import ProgressService
 from app.services.report.report_service import ReportService
 from app.services.report_generation.factories import build_report_generation_provider
 
@@ -61,6 +71,21 @@ async def generate_report_job(*, job_id: str, interview_id: str, user_id: str) -
             interview_id=interview_id,
             report_id=str(report.id) if report else None,
         )
+
+        if report is not None:
+            try:
+                await ProgressService(session).record_session_progress(
+                    report, user_id=uuid.UUID(user_id)
+                )
+            except Exception as exc:  # noqa: BLE001 — must never void an already-valid report
+                logger.error(
+                    "progress.job.record_failed",
+                    job_id=job_id,
+                    interview_id=interview_id,
+                    error=str(exc),
+                )
+            else:
+                logger.info("progress.job.recorded", job_id=job_id, interview_id=interview_id)
 
 
 JOB_HANDLERS["generate_report"] = generate_report_job

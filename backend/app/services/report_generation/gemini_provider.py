@@ -43,8 +43,9 @@ evidence-backed weak/strong topics and roadmap resources. Follow these rules str
    "SQL joins"), never a vague label like "technical skills". evidence_text must cite or
    paraphrase the actual evidence you were given for that topic — never fabricated. Empty lists
    are correct when there is genuinely nothing weak or nothing strong to report. Every weak_area
-   must set `section` to whichever of the five given section scores it best belongs to — this
-   determines its severity deterministically, so pick the section the evidence actually came from.
+   and strong_area must set `section` to whichever of the five given section scores it best
+   belongs to — for weak_areas this determines severity deterministically, so pick the section
+   the evidence actually came from in both cases.
 5. roadmap_items: one or more concrete learning resources per weak area, each with a real,
    plausible resource_title and resource_type; priority 1 is the most urgent.
 6. Never comment on whether a score itself is "wrong" or should have been different — that is

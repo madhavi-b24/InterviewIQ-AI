@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 class EmailProvider(Protocol):
     async def send_password_reset_email(self, *, to: str, reset_token: str) -> None: ...
+    async def send_verification_email(self, *, to: str, verification_token: str) -> None: ...
 
 
 class ConsoleEmailProvider:
@@ -47,3 +48,6 @@ class ConsoleEmailProvider:
 
     async def send_password_reset_email(self, *, to: str, reset_token: str) -> None:
         logger.info("email.password_reset.sent_console_mock", to=to)
+
+    async def send_verification_email(self, *, to: str, verification_token: str) -> None:
+        logger.info("email.verification.sent_console_mock", to=to)
