@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from app.models.user import PasswordResetToken, RefreshToken, User
+from app.models.user import EmailVerificationToken, PasswordResetToken, RefreshToken, User
 from app.repositories.base import BaseRepository
 
 
@@ -73,5 +73,32 @@ class PasswordResetTokenRepository(BaseRepository[PasswordResetToken]):
         return result.scalar_one_or_none()
 
     async def mark_used(self, token: PasswordResetToken) -> None:
+        token.used_at = datetime.now(UTC)
+        await self._session.flush()
+
+
+class EmailVerificationTokenRepository(BaseRepository[EmailVerificationToken]):
+    model = EmailVerificationToken
+
+    async def get_by_token_hash(self, token_hash: str) -> EmailVerificationToken | None:
+        result = await self._session.execute(
+            select(EmailVerificationToken).where(EmailVerificationToken.token_hash == token_hash)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_token_hash_for_update(self, token_hash: str) -> EmailVerificationToken | None:
+        """Same lookup as get_by_token_hash, but with SELECT ... FOR UPDATE
+        — see RefreshTokenRepository.get_by_token_hash_for_update for why:
+        the same race applies to two concurrent verify_email calls racing
+        on used_at IS NULL for the same token.
+        """
+        result = await self._session.execute(
+            select(EmailVerificationToken)
+            .where(EmailVerificationToken.token_hash == token_hash)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def mark_used(self, token: EmailVerificationToken) -> None:
         token.used_at = datetime.now(UTC)
         await self._session.flush()
